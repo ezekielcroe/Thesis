@@ -33,8 +33,10 @@ struct ModalEditor: View {
                     mode: $mode,
                     cursorPosition: $cursorPosition,
                     highlightRange: $highlightRange,
+                    diffChanges: $diffChanges,  // BUGFIX #4: Pass diff changes for rendering
                     onTextChange: { handleTextChange() },
-                    onKeyPress: { key, modifiers in handleKeyPress(key, modifiers: modifiers) }
+                    onKeyPress: { key, modifiers in handleKeyPress(key, modifiers: modifiers) },
+                    onModeChange: { newMode in handleModeChange(newMode) }  // BUGFIX #2: Handle mode changes from delegate
                 )
                 .border(mode.borderColor, width: 3)
             }
@@ -45,7 +47,8 @@ struct ModalEditor: View {
                 commandBuffer: commandBuffer,
                 stats: stats,
                 draftInfo: draftInfo,
-                hasUnsavedChanges: document.hasUnsavedChanges
+                hasUnsavedChanges: document.hasUnsavedChanges,
+                branchInfo: branchInfo  // BUGFIX #3: Show branch info
             )
         }
         .onAppear {
@@ -89,6 +92,14 @@ struct ModalEditor: View {
         return "No draft saved"
     }
     
+    // BUGFIX #3: Display branch information
+    private var branchInfo: String? {
+        if document.isBranching, let parent = document.currentBranchParent {
+            return "Branching from: \(parent.name)"
+        }
+        return nil
+    }
+    
     private func updateStats() {
         // Calculate stats using TextAnalyzer
         let paragraphs = TextAnalyzer.getParagraphs(in: document.currentContent)
@@ -109,18 +120,27 @@ struct ModalEditor: View {
     }
 
     private func handleTextChange() {
-            DispatchQueue.main.async {
-                self.updateStats()
-            }
-            
-            // Use a switch to match .edit OR any case of .insert
-            switch mode {
-            case .insert, .edit:
-                document.updateWorkingDraft()
-            default:
-                break
-            }
+        DispatchQueue.main.async {
+            self.updateStats()
         }
+        
+        // Use a switch to match .edit OR any case of .insert
+        switch mode {
+        case .insert, .edit:
+            document.updateWorkingDraft()
+        default:
+            break
+        }
+    }
+    
+    // BUGFIX #2: Handle mode changes triggered by the delegate
+    private func handleModeChange(_ newMode: EditorMode) {
+        mode = newMode
+        if newMode == .edit {
+            insertContext = nil
+            lastNewlinePosition = -1
+        }
+    }
     
     private func handleKeyPress(_ characters: String, modifiers: NSEvent.ModifierFlags) {
         // Handle Cmd+D for comp mode (only in EDIT mode)
@@ -163,7 +183,9 @@ struct ModalEditor: View {
         // All other keys pass through naturally
     }
     
-    // MARK: - Insert Mode (COMPLETE FIX)
+    // MARK: - Insert Mode
+    // Note: Exit trigger logic is now handled in EditorTextView.Coordinator.shouldChangeTextIn
+    // This handler is now simplified since the delegate handles exit conditions
 
     private func handleInsertMode(_ characters: String, context: InsertContext) {
         // ESC always exits to EDIT
@@ -173,45 +195,8 @@ struct ModalEditor: View {
             return
         }
         
-        // Check exit conditions based on context
-        switch context {
-        case .word:
-            // Exit on space or newline (block the character)
-            if characters == " " || characters == "\n" {
-                mode = .edit
-                insertContext = nil
-                // Don't type the space/newline
-                return
-            }
-            
-        case .sentence:
-            // Exit on . ! ? (allow the character first)
-            if characters == "." || characters == "!" || characters == "?" {
-                // Let the character be typed, then exit
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    self.mode = .edit
-                    self.insertContext = nil
-                }
-            }
-            
-        case .paragraph:
-            // Exit on double newline
-            if characters == "\n" {
-                if lastNewlinePosition == cursorPosition - 1 {
-                    // Second newline in a row - exit
-                    mode = .edit
-                    insertContext = nil
-                    lastNewlinePosition = -1
-                    return
-                } else {
-                    lastNewlinePosition = cursorPosition
-                }
-            } else {
-                lastNewlinePosition = -1
-            }
-        }
-        
-        // All other keys pass through to editor
+        // All other character handling is done by the delegate's shouldChangeTextIn
+        // The delegate blocks/allows characters and triggers mode changes as needed
     }
 
     // MARK: - Edit Mode
@@ -547,6 +532,15 @@ struct ModalEditor: View {
         )
         currentDiffIndex = 0
         mode = .comp
+        
+        // BUGFIX #4: Navigate to first change if any
+        if let firstChangeIndex = DiffGenerator.getChangeIndices(in: diffChanges).first {
+            currentDiffIndex = firstChangeIndex
+            // Move cursor to the first change
+            if currentDiffIndex < diffChanges.count {
+                cursorPosition = diffChanges[currentDiffIndex].range.location
+            }
+        }
     }
     
     private func handleCompMode(_ characters: String) {
@@ -557,17 +551,25 @@ struct ModalEditor: View {
             // Next change
             if let next = DiffGenerator.findNextChange(from: currentDiffIndex, in: diffChanges) {
                 currentDiffIndex = next
+                // Move cursor to the change
+                if currentDiffIndex < diffChanges.count {
+                    cursorPosition = diffChanges[currentDiffIndex].range.location
+                }
             }
             
         case "p":
             // Previous change
             if let prev = DiffGenerator.findPreviousChange(from: currentDiffIndex, in: diffChanges) {
                 currentDiffIndex = prev
+                // Move cursor to the change
+                if currentDiffIndex < diffChanges.count {
+                    cursorPosition = diffChanges[currentDiffIndex].range.location
+                }
             }
             
         case "\u{1B}": // ESC
             mode = .edit
-            diffChanges = []
+            diffChanges = []  // Clear diff data (and highlights via updateNSView)
             
         default:
             break
@@ -648,6 +650,7 @@ struct StatusBar: View {
     let stats: TextStats
     let draftInfo: String
     let hasUnsavedChanges: Bool
+    let branchInfo: String?  // BUGFIX #3: Show branch info
     
     var body: some View {
         HStack(spacing: 16) {
@@ -676,6 +679,17 @@ struct StatusBar: View {
                 Text("*")
                     .font(.system(size: 14, weight: .bold))
                     .foregroundColor(.orange)
+            }
+            
+            // BUGFIX #3: Branch indicator
+            if let branch = branchInfo {
+                Text(branch)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.purple)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(Color.purple.opacity(0.15))
+                    .cornerRadius(4)
             }
             
             Spacer()
@@ -786,4 +800,3 @@ struct PrintDraftSheet: View {
         .frame(width: 450)
     }
 }
-

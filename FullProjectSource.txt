@@ -1,0 +1,1991 @@
+
+==================================================
+FILE: Thesis/Draft.swift
+==================================================
+
+import Foundation
+
+struct Draft: Identifiable, Codable, Equatable {
+    let id: UUID
+    let name: String
+    let content: String
+    let timestamp: Date
+    let comment: String
+    let parentId: UUID?
+    let isFirstDraft: Bool
+    
+    init(name: String, content: String, comment: String = "", parentId: UUID? = nil, isFirstDraft: Bool = false) {
+        self.id = UUID()
+        self.name = name
+        self.content = content
+        self.timestamp = Date()
+        self.comment = comment
+        self.parentId = parentId
+        self.isFirstDraft = isFirstDraft
+    }
+    
+    var displayTimestamp: String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter.string(from: timestamp)
+    }
+    
+    var displayName: String {
+        if isFirstDraft {
+            return "First Draft: \(name)"
+        }
+        return name
+    }
+}
+
+// Working draft that auto-saves but isn't committed
+struct WorkingDraft: Codable {
+    var content: String
+    var lastSaved: Date
+    
+    init(content: String) {
+        self.content = content
+        self.lastSaved = Date()
+    }
+}
+
+
+==================================================
+FILE: Thesis/EditorTextView.swift
+==================================================
+
+import SwiftUI
+import AppKit
+
+struct EditorTextView: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var mode: EditorMode
+    @Binding var cursorPosition: Int
+    @Binding var highlightRange: NSRange?
+    
+    let onTextChange: () -> Void
+    let onKeyPress: (String, NSEvent.ModifierFlags) -> Void
+    
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        
+        let customTextView = CustomTextView()
+        scrollView.documentView = customTextView
+        
+        customTextView.delegate = context.coordinator
+        customTextView.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+        customTextView.isAutomaticQuoteSubstitutionEnabled = false
+        customTextView.isAutomaticDashSubstitutionEnabled = false
+        customTextView.isAutomaticSpellingCorrectionEnabled = false
+        customTextView.allowsUndo = false
+        customTextView.drawsBackground = true
+        customTextView.backgroundColor = NSColor.textBackgroundColor
+        
+        // Configuration for cursor visibility
+        customTextView.insertionPointColor = NSColor.controlAccentColor
+        customTextView.isSelectable = true
+        
+        context.coordinator.textView = customTextView
+        
+        return scrollView
+    }
+    
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? CustomTextView else { return }
+        
+        // Sync text
+        if textView.string != text {
+            textView.string = text
+        }
+        
+        // Sync cursor
+        if cursorPosition >= 0 && cursorPosition <= text.count {
+            let range = NSRange(location: cursorPosition, length: 0)
+            textView.setSelectedRange(range)
+            textView.scrollRangeToVisible(range)
+        }
+        
+        // Sync highlights
+        if let range = highlightRange {
+            textView.showFindIndicator(for: range)
+        }
+        
+        // Logic: Enable editing for Typing modes (Insert/FreeText), disable for Command modes
+        switch mode {
+        case .insert, .freeText:
+            textView.isEditable = true
+        default:
+            textView.isEditable = false
+        }
+        
+        textView.isSelectable = true
+        textView.currentMode = mode
+        
+        // Ensure focus
+        if textView.window?.firstResponder != textView {
+            textView.window?.makeFirstResponder(textView)
+        }
+        
+        // Visual feedback
+        if mode == .comp {
+            textView.textColor = NSColor.secondaryLabelColor
+        } else {
+            textView.textColor = NSColor.labelColor
+        }
+        
+        context.coordinator.parent = self
+    }
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: EditorTextView
+        weak var textView: CustomTextView?
+        
+        init(_ parent: EditorTextView) {
+            self.parent = parent
+            super.init()
+        }
+        
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            
+            parent.text = textView.string
+            parent.cursorPosition = textView.selectedRange().location
+            parent.onTextChange()
+        }
+        
+        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            // 1. Always Handle ESC in parent
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                parent.onKeyPress("\u{1B}", [])
+                return true
+            }
+            
+            // 2. Always Allow Arrow Keys
+            if commandSelector == #selector(NSResponder.moveUp(_:)) ||
+               commandSelector == #selector(NSResponder.moveDown(_:)) ||
+               commandSelector == #selector(NSResponder.moveLeft(_:)) ||
+               commandSelector == #selector(NSResponder.moveRight(_:)) {
+                return false
+            }
+            
+            // 3. Mode-Specific Behavior
+            switch parent.mode {
+            case .insert, .freeText:
+                // Allow NSTextView to handle standard commands (Enter, Delete, etc.)
+                return false
+            default:
+                // Intercept all other commands in Edit/Comp modes
+                return true
+            }
+        }
+        
+        func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
+            // Allow typing only in Insert or FreeText modes
+            switch parent.mode {
+            case .insert, .freeText:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+}
+
+// MARK: - Custom NSTextView
+
+class CustomTextView: NSTextView {
+    // Default to .insert(.word) to satisfy initialization requirements
+    var currentMode: EditorMode = .insert(.word)
+    
+    override var acceptsFirstResponder: Bool {
+        return true
+    }
+    
+    override func keyDown(with event: NSEvent) {
+        switch currentMode {
+        case .insert, .freeText:
+            // Standard typing behavior
+            super.keyDown(with: event)
+            
+        case .edit, .comp, .command:
+            // Intercept keys and send to parent handler
+            if let characters = event.characters {
+                if let coordinator = delegate as? EditorTextView.Coordinator {
+                    coordinator.parent.onKeyPress(characters, event.modifierFlags)
+                }
+            }
+            // Do NOT call super (suppress system beep/input)
+        }
+    }
+    
+    override var shouldDrawInsertionPoint: Bool {
+        return true
+    }
+    
+    override func updateInsertionPointStateAndRestartTimer(_ restartTimer: Bool) {
+        super.updateInsertionPointStateAndRestartTimer(restartTimer)
+        needsDisplay = true
+    }
+}
+
+
+==================================================
+FILE: Thesis/DraftHistoryView.swift
+==================================================
+
+import SwiftUI
+
+struct DraftHistoryView: View {
+    let document: Document
+    let onRestore: (Draft) -> Void
+    let onClose: () -> Void
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack {
+                Text("Evolution Timeline")
+                    .font(.headline)
+                Spacer()
+                Button(action: onClose) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding()
+            .background(Color(NSColor.controlBackgroundColor))
+            
+            Divider()
+            
+            // Draft list
+            if document.drafts.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "clock.badge.exclamationmark")
+                        .font(.system(size: 48))
+                        .foregroundColor(.secondary)
+                    Text("No drafts saved yet")
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+                    Text("Press ESC to save your first draft")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(document.drafts.reversed()) { draft in
+                            DraftRow(
+                                draft: draft,
+                                isCurrent: draft.id == document.latestDraft?.id,
+                                onRestore: { onRestore(draft) }
+                            )
+                        }
+                    }
+                    .padding()
+                }
+            }
+        }
+    }
+}
+
+struct DraftRow: View {
+    let draft: Draft
+    let isCurrent: Bool
+    let onRestore: () -> Void
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                // Timeline indicator
+                Circle()
+                    .fill(isCurrent ? Color.blue : Color.gray)
+                    .frame(width: 10, height: 10)
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(draft.displayName)
+                            .font(.system(size: 14, weight: .semibold))
+                        
+                        if isCurrent {
+                            Text("CURRENT")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.blue)
+                                .cornerRadius(3)
+                        }
+                        
+                        Spacer()
+                        
+                        if !isCurrent {
+                            Button("Restore") {
+                                onRestore()
+                            }
+                            .buttonStyle(.borderless)
+                            .font(.system(size: 11))
+                        }
+                    }
+                    
+                    if !draft.comment.isEmpty {
+                        Text(draft.comment)
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Text(draft.displayTimestamp)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+            }
+            
+            // Preview of content (first line)
+            Text(draft.content.components(separatedBy: .newlines).first ?? "")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .padding(.leading, 20)
+        }
+        .padding(12)
+        .background(isCurrent ? Color.blue.opacity(0.1) : Color(NSColor.controlBackgroundColor).opacity(0.5))
+        .cornerRadius(8)
+    }
+}
+
+
+==================================================
+FILE: Thesis/ThesisApp.swift
+==================================================
+
+import SwiftUI
+
+@main
+struct ThesisApp: App {
+    @StateObject private var documentManager = DocumentManager()
+    
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+                .environmentObject(documentManager)
+                .frame(minWidth: 900, minHeight: 600)
+        }
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("New Thought") {
+                    documentManager.createNewDocument()
+                }
+                .keyboardShortcut("n", modifiers: .command)
+            }
+        }
+    }
+}
+
+
+==================================================
+FILE: Thesis/DocumentManager.swift
+==================================================
+
+import Foundation
+import Combine
+
+class DocumentManager: ObservableObject {
+    @Published var documents: [Document] = []
+    @Published var selectedDocument: Document?
+    
+    private let saveKey = "ThesisDocumentsMVP"
+    private var cancellables = Set<AnyCancellable>()
+    private var autoSaveTimer: Timer?
+    
+    init() {
+        loadDocuments()
+        setupAutoSave()
+    }
+    
+    private func setupAutoSave() {
+        // Auto-save every 30 seconds
+        autoSaveTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            self?.saveDocuments()
+        }
+    }
+    
+    func createNewDocument() {
+        let doc = Document()
+        documents.append(doc)
+        selectedDocument = doc
+        saveDocuments()
+    }
+    
+    func deleteDocument(_ document: Document) {
+        documents.removeAll { $0.id == document.id }
+        if selectedDocument?.id == document.id {
+            selectedDocument = documents.first
+        }
+        saveDocuments()
+    }
+    
+    func saveDocuments() {
+        do {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(documents)
+            UserDefaults.standard.set(data, forKey: saveKey)
+        } catch {
+            print("Failed to save documents: \(error)")
+        }
+    }
+    
+    private func loadDocuments() {
+        guard let data = UserDefaults.standard.data(forKey: saveKey) else {
+            createWelcomeDocument()
+            return
+        }
+        
+        do {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            documents = try decoder.decode([Document].self, from: data)
+            selectedDocument = documents.first
+        } catch {
+            print("Failed to load documents: \(error)")
+            createWelcomeDocument()
+        }
+    }
+    
+    private func createWelcomeDocument() {
+        let welcome = Document(title: "Welcome to Thesis")
+        welcome.currentContent = """
+Welcome to Thesis - A modal editor for thought evolution.
+
+You are currently in INSERT mode. Type freely to capture your thoughts.
+
+When ready, press ESC. You'll be prompted to save this as your First Draft.
+
+After saving, you'll enter EDIT mode where you can:
+- Navigate: h (prev sentence), l (next sentence), j (next para), k (prev para)
+- Delete: dw (word), das (sentence), dap (paragraph), D (to end of sentence)
+- Change: cw (word), cas (sentence), cap (paragraph), C (to end of sentence)
+- Insert: i (insert word), a (append sentence)
+- Undo: u (undo last 10 commands)
+
+To review your changes:
+- Type :comp or press Cmd+D to see a diff view
+- Use n (next change) and p (previous change) to navigate
+- Type :print or press Cmd+S to save as a new draft
+
+Try editing this document to learn the workflow!
+"""
+        documents.append(welcome)
+        selectedDocument = welcome
+        saveDocuments()
+    }
+    
+    deinit {
+        autoSaveTimer?.invalidate()
+    }
+}
+
+
+==================================================
+FILE: Thesis/TextAnalyzer.swift
+==================================================
+
+import Foundation
+import NaturalLanguage
+
+struct TextUnit {
+    let range: NSRange
+    let text: String
+}
+
+class TextAnalyzer {
+    
+    // MARK: - Sentence Detection
+    
+    static func getSentences(in text: String) -> [TextUnit] {
+        var sentences: [TextUnit] = []
+        let nsText = text as NSString
+        
+        let tagger = NLTagger(tagSchemes: [.lexicalClass])
+        tagger.string = text
+        
+        tagger.enumerateTags(in: text.startIndex..<text.endIndex,
+                            unit: .sentence,
+                            scheme: .lexicalClass) { _, range in
+            let nsRange = NSRange(range, in: text)
+            let sentenceText = nsText.substring(with: nsRange)
+            sentences.append(TextUnit(range: nsRange, text: sentenceText))
+            return true
+        }
+        
+        return sentences
+    }
+    
+    static func getSentenceAt(position: Int, in text: String) -> TextUnit? {
+        let sentences = getSentences(in: text)
+        return sentences.first { NSLocationInRange(position, $0.range) }
+    }
+    
+    static func getNextSentence(from position: Int, in text: String) -> TextUnit? {
+        let sentences = getSentences(in: text)
+        return sentences.first { $0.range.location > position }
+    }
+    
+    static func getPreviousSentence(from position: Int, in text: String) -> TextUnit? {
+        let sentences = getSentences(in: text)
+        return sentences.last { $0.range.location < position }
+    }
+    
+    // MARK: - Paragraph Detection
+    
+    static func getParagraphs(in text: String) -> [TextUnit] {
+        var paragraphs: [TextUnit] = []
+        let nsText = text as NSString
+        
+        let tagger = NLTagger(tagSchemes: [.lexicalClass])
+        tagger.string = text
+        
+        tagger.enumerateTags(in: text.startIndex..<text.endIndex,
+                            unit: .paragraph,
+                            scheme: .lexicalClass) { _, range in
+            let nsRange = NSRange(range, in: text)
+            let paragraphText = nsText.substring(with: nsRange)
+            
+            // Only include non-empty paragraphs
+            if !paragraphText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                paragraphs.append(TextUnit(range: nsRange, text: paragraphText))
+            }
+            return true
+        }
+        
+        return paragraphs
+    }
+    
+    static func getParagraphAt(position: Int, in text: String) -> TextUnit? {
+        let paragraphs = getParagraphs(in: text)
+        return paragraphs.first { NSLocationInRange(position, $0.range) }
+    }
+    
+    static func getNextParagraph(from position: Int, in text: String) -> TextUnit? {
+        let paragraphs = getParagraphs(in: text)
+        return paragraphs.first { $0.range.location > position }
+    }
+    
+    static func getPreviousParagraph(from position: Int, in text: String) -> TextUnit? {
+        let paragraphs = getParagraphs(in: text)
+        return paragraphs.last { $0.range.location < position }
+    }
+    
+    // MARK: - Word Detection
+    
+    static func getWords(in text: String) -> [TextUnit] {
+        var words: [TextUnit] = []
+        let nsText = text as NSString
+        
+        let tagger = NLTagger(tagSchemes: [.lexicalClass])
+        tagger.string = text
+        
+        tagger.enumerateTags(in: text.startIndex..<text.endIndex,
+                            unit: .word,
+                            scheme: .lexicalClass) { _, range in
+            let nsRange = NSRange(range, in: text)
+            let wordText = nsText.substring(with: nsRange)
+            words.append(TextUnit(range: nsRange, text: wordText))
+            return true
+        }
+        
+        return words
+    }
+    
+    static func getWordAt(position: Int, in text: String) -> TextUnit? {
+        let words = getWords(in: text)
+        return words.first { NSLocationInRange(position, $0.range) }
+    }
+    
+    static func getNextWord(from position: Int, in text: String) -> TextUnit? {
+        let words = getWords(in: text)
+        return words.first { $0.range.location > position }
+    }
+    
+    static func getPreviousWord(from position: Int, in text: String) -> TextUnit? {
+        let words = getWords(in: text)
+        return words.last { $0.range.location < position }
+    }
+    
+    // MARK: - Helper Methods
+    
+    static func getRestOfSentence(from position: Int, in text: String) -> TextUnit? {
+        guard let sentence = getSentenceAt(position: position, in: text) else { return nil }
+        
+        let restStart = position
+        let restEnd = sentence.range.location + sentence.range.length
+        let restRange = NSRange(location: restStart, length: restEnd - restStart)
+        
+        let nsText = text as NSString
+        let restText = nsText.substring(with: restRange)
+        
+        return TextUnit(range: restRange, text: restText)
+    }
+    
+    // MARK: - Additional Helper for Word Boundaries
+    
+    static func getForwardWord(from position: Int, in text: String) -> TextUnit? {
+        let words = getWords(in: text)
+        
+        // Find the word that starts at or after the current position
+        if let currentWord = words.first(where: { $0.range.location >= position }) {
+            return currentWord
+        }
+        
+        // If cursor is inside a word, get the next word
+        return words.first { $0.range.location > position }
+    }
+    
+    static func getBackwardWord(from position: Int, in text: String) -> TextUnit? {
+        let words = getWords(in: text)
+        
+        // Find the word that ends at or before the current position
+        return words.last { $0.range.location + $0.range.length <= position }
+    }
+}
+
+
+==================================================
+FILE: Thesis/ModalEditor.swift
+==================================================
+
+import SwiftUI
+import AppKit
+
+// MARK: - TextStats (needed for StatusBar)
+struct TextStats {
+    let paragraphCount: Int
+    let sentenceCount: Int
+    let wordCount: Int
+}
+
+struct ModalEditor: View {
+    @Binding var document: Document
+    @State private var mode: EditorMode = .freeText  // Start in FREE TEXT
+    @State private var commandBuffer: String = ""
+    @State private var insertContext: InsertContext?
+    @State private var lastNewlinePosition: Int = -1  // For paragraph mode
+    @State private var pendingCommand: PendingCommand?
+    @State private var highlightRange: NSRange?
+    @State private var cursorPosition: Int = 0
+    @State private var undoStack = UndoStack()
+    @State private var showingFirstDraftSheet = false
+    @State private var showingPrintSheet = false
+    @State private var diffChanges: [DiffChange] = []
+    @State private var currentDiffIndex: Int = 0
+    @State private var stats: TextStats = TextStats(paragraphCount: 0, sentenceCount: 0, wordCount: 0)
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Main editor area
+            ZStack {
+                EditorTextView(
+                    text: $document.currentContent,
+                    mode: $mode,
+                    cursorPosition: $cursorPosition,
+                    highlightRange: $highlightRange,
+                    onTextChange: { handleTextChange() },
+                    onKeyPress: { key, modifiers in handleKeyPress(key, modifiers: modifiers) }
+                )
+                .border(mode.borderColor, width: 3)
+            }
+            
+            // Status bar
+            StatusBar(
+                mode: mode,
+                commandBuffer: commandBuffer,
+                stats: stats,
+                draftInfo: draftInfo,
+                hasUnsavedChanges: document.hasUnsavedChanges
+            )
+        }
+        .onAppear {
+            DispatchQueue.main.async {
+                updateStats()
+            }
+            // Start in FREE TEXT if no drafts, EDIT if we have drafts
+            if !document.drafts.isEmpty {
+                mode = .edit
+            }
+        }
+        .sheet(isPresented: $showingFirstDraftSheet) {
+            FirstDraftSheet(
+                onSave: { name in
+                    document.saveFirstDraft(name: name)
+                    mode = .edit
+                    showingFirstDraftSheet = false
+                },
+                onCancel: {
+                    mode = .freeText
+                    showingFirstDraftSheet = false
+                }
+            )
+        }
+        .sheet(isPresented: $showingPrintSheet) {
+            PrintDraftSheet(
+                onSave: { name, comment in
+                    document.saveDraft(name: name, comment: comment)
+                    mode = .edit
+                    showingPrintSheet = false
+                    updateStats()
+                }
+            )
+        }
+    }
+    
+    private var draftInfo: String {
+        if let latest = document.latestDraft {
+            return latest.displayName
+        }
+        return "No draft saved"
+    }
+    
+    private func updateStats() {
+        // Calculate stats using TextAnalyzer
+        let paragraphs = TextAnalyzer.getParagraphs(in: document.currentContent)
+        let sentences = TextAnalyzer.getSentences(in: document.currentContent)
+        let words = TextAnalyzer.getWords(in: document.currentContent)
+        
+        // Create the stats object
+        let newStats = TextStats(
+            paragraphCount: paragraphs.count,
+            sentenceCount: sentences.count,
+            wordCount: words.count
+        )
+        
+        // FIX: Defer state modification to avoid "modifying state during view update"
+        DispatchQueue.main.async {
+            self.stats = newStats
+        }
+    }
+
+    private func handleTextChange() {
+            DispatchQueue.main.async {
+                self.updateStats()
+            }
+            
+            // Use a switch to match .edit OR any case of .insert
+            switch mode {
+            case .insert, .edit:
+                document.updateWorkingDraft()
+            default:
+                break
+            }
+        }
+    
+    private func handleKeyPress(_ characters: String, modifiers: NSEvent.ModifierFlags) {
+        // Handle Cmd+D for comp mode (only in EDIT mode)
+        if modifiers.contains(.command) && characters == "d" && mode == .edit {
+            enterCompMode()
+            return
+        }
+        
+        // Handle Cmd+S for print (only in EDIT mode)
+        if modifiers.contains(.command) && characters == "s" && mode == .edit {
+            if document.latestDraft != nil {
+                showingPrintSheet = true
+            }
+            return
+        }
+        
+        switch mode {
+        case .freeText:
+            handleFreeTextMode(characters)
+        case .edit:
+            handleEditMode(characters, modifiers: modifiers)
+        case .insert(let context):
+            handleInsertMode(characters, context: context)
+        case .command(let current):
+            handleCommandMode(characters, current: current)
+        case .comp:
+            handleCompMode(characters)
+        }
+    }
+
+    // MARK: - FREE TEXT Mode Handler
+
+    private func handleFreeTextMode(_ characters: String) {
+        // Only ESC exits - everything else is passed to editor
+        if characters == "\u{1B}" { // ESC
+            if !document.currentContent.isEmpty {
+                showingFirstDraftSheet = true
+            }
+        }
+        // All other keys pass through naturally
+    }
+    
+    // MARK: - Insert Mode (COMPLETE FIX)
+
+    private func handleInsertMode(_ characters: String, context: InsertContext) {
+        // ESC always exits to EDIT
+        if characters == "\u{1B}" {
+            mode = .edit
+            insertContext = nil
+            return
+        }
+        
+        // Check exit conditions based on context
+        switch context {
+        case .word:
+            // Exit on space or newline (block the character)
+            if characters == " " || characters == "\n" {
+                mode = .edit
+                insertContext = nil
+                // Don't type the space/newline
+                return
+            }
+            
+        case .sentence:
+            // Exit on . ! ? (allow the character first)
+            if characters == "." || characters == "!" || characters == "?" {
+                // Let the character be typed, then exit
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    self.mode = .edit
+                    self.insertContext = nil
+                }
+            }
+            
+        case .paragraph:
+            // Exit on double newline
+            if characters == "\n" {
+                if lastNewlinePosition == cursorPosition - 1 {
+                    // Second newline in a row - exit
+                    mode = .edit
+                    insertContext = nil
+                    lastNewlinePosition = -1
+                    return
+                } else {
+                    lastNewlinePosition = cursorPosition
+                }
+            } else {
+                lastNewlinePosition = -1
+            }
+        }
+        
+        // All other keys pass through to editor
+    }
+
+    // MARK: - Edit Mode
+
+    private func handleEditMode(_ characters: String, modifiers: NSEvent.ModifierFlags) {
+        guard let char = characters.first else { return }
+        
+        // Check for multi-character commands first
+        if !commandBuffer.isEmpty {
+            let combined = commandBuffer + String(char)
+            
+            // Two-character commands
+            if combined == "dw" {
+                executeDeleteWord(forward: true)
+                commandBuffer = ""
+                return
+            } else if combined == "db" {
+                executeDeleteWord(forward: false)
+                commandBuffer = ""
+                return
+            } else if combined == "cw" {
+                executeChangeWord()
+                commandBuffer = ""
+                return
+            }
+            
+            // Partial three-character commands
+            if combined == "da" || combined == "ca" {
+                commandBuffer = combined
+                return
+            }
+            
+            // Complete three-character commands
+            if combined == "das" {
+                executeDeleteSentence()
+                commandBuffer = ""
+                return
+            } else if combined == "dap" {
+                executeDeleteParagraph()
+                commandBuffer = ""
+                return
+            } else if combined == "cas" {
+                executeChangeSentence()
+                commandBuffer = ""
+                return
+            } else if combined == "cap" {
+                executeChangeParagraph()
+                commandBuffer = ""
+                return
+            }
+            
+            // Invalid combination - clear and process as single
+            commandBuffer = ""
+        }
+        
+        // Single character commands
+        switch char {
+        case "h":
+            moveToPreviousSentence()
+            
+        case "l":
+            moveToNextSentence()
+            
+        case "j":
+            moveToNextParagraph()
+            
+        case "k":
+            moveToPreviousParagraph()
+            
+        case "w":
+            if commandBuffer.isEmpty {
+                moveToNextWord()
+            }
+            // If buffer has 'd' or 'c', this completes 'dw' or 'cw' (handled above)
+            
+        case "b":
+            if commandBuffer.isEmpty {
+                moveToPreviousWord()
+            }
+            // If buffer has 'd', this completes 'db' (handled above)
+            
+        case "d":
+            if modifiers.contains(.shift) {
+                executeDeleteToEnd()
+            } else {
+                commandBuffer = "d"
+            }
+            
+        case "c":
+            if modifiers.contains(.shift) {
+                executeChangeToEnd()
+            } else {
+                commandBuffer = "c"
+            }
+            
+        case "i":
+            mode = .insert(.word)
+            insertContext = .word
+            commandBuffer = ""
+            
+        case "a":
+            if commandBuffer.isEmpty {
+                mode = .insert(.sentence)
+                insertContext = .sentence
+            }
+            // If buffer is 'd' or 'c', keep waiting for 's' or 'p'
+            
+        case "s":
+            // Only valid after 'da' or 'ca'
+            // Will be handled by multi-char check above
+            break
+            
+        case "p":
+            // Only valid after 'da' or 'ca'
+            // Will be handled by multi-char check above
+            break
+            
+        case "u":
+            executeUndo()
+            commandBuffer = ""
+            
+        case ":":
+            mode = .command("")
+            commandBuffer = ""
+            
+        default:
+            commandBuffer = ""
+        }
+    }
+    
+    // MARK: - Navigation Commands
+    
+    private func moveToPreviousSentence() {
+        if let prev = TextAnalyzer.getPreviousSentence(from: cursorPosition, in: document.currentContent) {
+            cursorPosition = prev.range.location
+        }
+    }
+
+    private func moveToNextSentence() {
+        if let next = TextAnalyzer.getNextSentence(from: cursorPosition, in: document.currentContent) {
+            cursorPosition = next.range.location
+        }
+    }
+
+    private func moveToPreviousParagraph() {
+        if let prev = TextAnalyzer.getPreviousParagraph(from: cursorPosition, in: document.currentContent) {
+            cursorPosition = prev.range.location
+        }
+    }
+
+    private func moveToNextParagraph() {
+        if let next = TextAnalyzer.getNextParagraph(from: cursorPosition, in: document.currentContent) {
+            cursorPosition = next.range.location
+        }
+    }
+
+    private func moveToNextWord() {
+        let words = TextAnalyzer.getWords(in: document.currentContent)
+        
+        // Find the first word that starts AFTER the current cursor position
+        if let nextWord = words.first(where: { $0.range.location > cursorPosition }) {
+            cursorPosition = nextWord.range.location
+        }
+    }
+
+    private func moveToPreviousWord() {
+        let words = TextAnalyzer.getWords(in: document.currentContent)
+        
+        // Find the last word that starts BEFORE the current cursor position
+        if let prevWord = words.last(where: { $0.range.location < cursorPosition }) {
+            cursorPosition = prevWord.range.location
+        }
+    }
+    
+    // MARK: - Delete Commands
+    
+    private func executeDeleteWord(forward: Bool) {
+        let words = TextAnalyzer.getWords(in: document.currentContent)
+        let nsText = document.currentContent as NSString
+        
+        if forward {
+            // Find word at or after cursor
+            guard let word = words.first(where: { $0.range.location >= cursorPosition }) else { return }
+            
+            // Calculate range including trailing space
+            var deleteRange = word.range
+            let endPos = deleteRange.location + deleteRange.length
+            
+            // Include trailing space if it exists
+            if endPos < nsText.length {
+                let nextChar = nsText.substring(with: NSRange(location: endPos, length: 1))
+                if nextChar == " " || nextChar == "\n" {
+                    deleteRange.length += 1
+                }
+            }
+            
+            highlightRangeBriefly(deleteRange) {
+                self.deleteRange(deleteRange)
+            }
+            
+        } else {
+            // Find word before cursor
+            guard let word = words.last(where: { $0.range.location + $0.range.length <= cursorPosition }) else { return }
+            
+            // Calculate range including leading space
+            var deleteRange = word.range
+            
+            // Include leading space if it exists
+            if deleteRange.location > 0 {
+                let prevChar = nsText.substring(with: NSRange(location: deleteRange.location - 1, length: 1))
+                if prevChar == " " || prevChar == "\n" {
+                    deleteRange.location -= 1
+                    deleteRange.length += 1
+                }
+            }
+            
+            highlightRangeBriefly(deleteRange) {
+                self.deleteRange(deleteRange)
+            }
+        }
+    }
+    
+    private func executeDeleteSentence() {
+        guard let sentence = TextAnalyzer.getSentenceAt(position: cursorPosition, in: document.currentContent) else { return }
+        
+        highlightRangeBriefly(sentence.range) {
+            deleteRange(sentence.range)
+        }
+    }
+    
+    private func executeDeleteParagraph() {
+        guard let paragraph = TextAnalyzer.getParagraphAt(position: cursorPosition, in: document.currentContent) else { return }
+        
+        highlightRangeBriefly(paragraph.range) {
+            deleteRange(paragraph.range)
+        }
+    }
+    
+    private func executeDeleteToEnd() {
+        guard let rest = TextAnalyzer.getRestOfSentence(from: cursorPosition, in: document.currentContent) else { return }
+        
+        highlightRangeBriefly(rest.range) {
+            deleteRange(rest.range)
+        }
+    }
+    
+    private func deleteRange(_ range: NSRange) {
+        let beforeContent = document.currentContent
+        let nsText = beforeContent as NSString
+        let afterContent = nsText.replacingCharacters(in: range, with: "")
+        
+        let command = UndoCommand(
+            beforeContent: beforeContent,
+            afterContent: afterContent,
+            cursorBefore: cursorPosition,
+            cursorAfter: range.location
+        )
+        
+        undoStack.push(command)
+        document.currentContent = afterContent
+        cursorPosition = range.location
+        handleTextChange()
+    }
+    
+    // MARK: - Change Commands
+    
+    private func executeChangeWord() {
+        let words = TextAnalyzer.getWords(in: document.currentContent)
+        
+        // Find word at or immediately after cursor
+        guard let word = words.first(where: {
+            $0.range.location >= cursorPosition ||
+            NSLocationInRange(cursorPosition, $0.range)
+        }) else { return }
+        
+        highlightRangeBriefly(word.range) {
+            deleteRange(word.range)
+            mode = .insert(.word)
+            insertContext = .word
+        }
+    }
+
+
+    private func executeChangeSentence() {
+        guard let sentence = TextAnalyzer.getSentenceAt(position: cursorPosition, in: document.currentContent) else { return }
+        
+        highlightRangeBriefly(sentence.range) {
+            deleteRange(sentence.range)
+            mode = .insert(.sentence)
+            insertContext = .sentence
+        }
+    }
+
+    private func executeChangeParagraph() {
+        guard let paragraph = TextAnalyzer.getParagraphAt(position: cursorPosition, in: document.currentContent) else { return }
+        
+        highlightRangeBriefly(paragraph.range) {
+            deleteRange(paragraph.range)
+            mode = .insert(.paragraph)
+            insertContext = .paragraph
+        }
+    }
+
+    private func executeChangeToEnd() {
+        guard let rest = TextAnalyzer.getRestOfSentence(from: cursorPosition, in: document.currentContent) else { return }
+        
+        highlightRangeBriefly(rest.range) {
+            deleteRange(rest.range)
+            mode = .insert(.sentence)
+            insertContext = .sentence
+        }
+    }
+    
+    // MARK: - Undo
+    
+    private func executeUndo() {
+        guard let command = undoStack.pop() else { return }
+        
+        if let newPosition = command.undo(in: &document.currentContent) {
+            cursorPosition = newPosition
+            handleTextChange()
+        }
+    }
+    
+    // MARK: - Comp Mode
+    
+    private func enterCompMode() {
+        guard let latestDraft = document.latestDraft else { return }
+        
+        diffChanges = DiffGenerator.generateDiff(
+            from: latestDraft.content,
+            to: document.currentContent
+        )
+        currentDiffIndex = 0
+        mode = .comp
+    }
+    
+    private func handleCompMode(_ characters: String) {
+        guard let char = characters.first else { return }
+        
+        switch char {
+        case "n":
+            // Next change
+            if let next = DiffGenerator.findNextChange(from: currentDiffIndex, in: diffChanges) {
+                currentDiffIndex = next
+            }
+            
+        case "p":
+            // Previous change
+            if let prev = DiffGenerator.findPreviousChange(from: currentDiffIndex, in: diffChanges) {
+                currentDiffIndex = prev
+            }
+            
+        case "\u{1B}": // ESC
+            mode = .edit
+            diffChanges = []
+            
+        default:
+            break
+        }
+    }
+    
+    // MARK: - Command Mode
+    
+    private func handleCommandMode(_ characters: String, current: String) {
+        guard let char = characters.first else { return }
+        
+        if char == "\u{1B}" { // ESC
+            mode = .edit
+            return
+        }
+        
+        if char == "\r" || char == "\n" { // Return
+            executeCommand(current)
+            return
+        }
+        
+        // Add character to command string
+        mode = .command(current + String(char))
+    }
+
+    private func executeCommand(_ cmd: String) {
+        switch cmd {
+        case "comp":
+            enterCompMode()
+            
+        case "print":
+            if document.latestDraft != nil {
+                showingPrintSheet = true
+            }
+            mode = .edit
+            
+        default:
+            mode = .edit
+        }
+    }
+    
+    // MARK: - Helpers
+    
+    private func highlightRangeBriefly(_ range: NSRange, completion: @escaping () -> Void) {
+        highlightRange = range
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            highlightRange = nil
+            completion()
+        }
+    }
+}
+
+// MARK: - Supporting Types
+
+struct PendingCommand {
+    let type: PendingCommandType
+    let startPosition: Int
+}
+
+enum PendingCommandType {
+    case insertWord
+    case appendSentence
+    case change(replacedText: String, range: NSRange, exitOn: ExitCondition)
+}
+
+enum ExitCondition {
+    case space
+    case punctuation
+    case doubleNewline
+}
+
+// MARK: - Status Bar
+
+struct StatusBar: View {
+    let mode: EditorMode
+    let commandBuffer: String
+    let stats: TextStats
+    let draftInfo: String
+    let hasUnsavedChanges: Bool
+    
+    var body: some View {
+        HStack(spacing: 16) {
+            // Mode indicator
+            Text(mode.displayName)
+                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(mode.borderColor)
+                .cornerRadius(4)
+            
+            // Command buffer
+            if !commandBuffer.isEmpty {
+                Text(commandBuffer)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            
+            // Draft info
+            Text(draftInfo)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(hasUnsavedChanges ? .orange : .secondary)
+            
+            if hasUnsavedChanges {
+                Text("*")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(.orange)
+            }
+            
+            Spacer()
+            
+            // Stats
+            HStack(spacing: 12) {
+                Text("\(stats.paragraphCount) ¶")
+                Text("\(stats.sentenceCount) sentences")
+                Text("\(stats.wordCount) words")
+            }
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(NSColor.controlBackgroundColor))
+    }
+}
+
+// MARK: - Sheets
+
+struct FirstDraftSheet: View {
+    @State private var draftName: String = ""
+    let onSave: (String) -> Void
+    let onCancel: () -> Void
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Save as First Draft")
+                .font(.headline)
+            
+            Text("This will be the baseline for tracking your thought evolution.")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+            
+            TextField("Draft name (e.g., 'Initial thoughts')", text: $draftName)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit {
+                    if !draftName.isEmpty {
+                        dismiss()
+                        onSave(draftName)
+                    }
+                }
+            
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    dismiss()
+                    onCancel()
+                }
+                .keyboardShortcut(.escape) // FIX: Add escape shortcut
+                
+                Button("Save") {
+                    if !draftName.isEmpty {
+                        dismiss()
+                        onSave(draftName)
+                    }
+                }
+                .keyboardShortcut(.return) // FIX: Add return shortcut
+                .disabled(draftName.isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 450)
+    }
+}
+
+struct PrintDraftSheet: View {
+    @State private var draftName: String = ""
+    @State private var comment: String = ""
+    let onSave: (String, String) -> Void
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Save Draft")
+                .font(.headline)
+            
+            Text("Capture this evolution point with a name and comment.")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+            
+            TextField("Draft name", text: $draftName)
+                .textFieldStyle(.roundedBorder)
+            
+            TextField("What changed in your thinking?", text: $comment)
+                .textFieldStyle(.roundedBorder)
+            
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    dismiss()
+                }
+                .keyboardShortcut(.escape)
+                
+                Button("Save") {
+                    if !draftName.isEmpty && !comment.isEmpty {
+                        dismiss()
+                        onSave(draftName, comment)
+                    }
+                }
+                .keyboardShortcut(.return)
+                .disabled(draftName.isEmpty || comment.isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 450)
+    }
+}
+
+
+
+==================================================
+FILE: Thesis/Document.swift
+==================================================
+
+import Foundation
+import Combine
+
+class Document: ObservableObject, Identifiable, Codable, Equatable {
+    let id: UUID
+    @Published var title: String
+    @Published var currentContent: String
+    @Published var drafts: [Draft]
+    @Published var workingDraft: WorkingDraft?
+    @Published var lastModified: Date
+    
+    enum CodingKeys: String, CodingKey {
+        case id, title, currentContent, drafts, workingDraft, lastModified
+    }
+    
+    init(title: String = "Untitled Thought") {
+        self.id = UUID()
+        self.title = title
+        self.currentContent = ""
+        self.drafts = []
+        self.workingDraft = nil
+        self.lastModified = Date()
+    }
+    
+    required init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        currentContent = try container.decode(String.self, forKey: .currentContent)
+        drafts = try container.decode([Draft].self, forKey: .drafts)
+        workingDraft = try container.decodeIfPresent(WorkingDraft.self, forKey: .workingDraft)
+        lastModified = try container.decode(Date.self, forKey: .lastModified)
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        try container.encode(currentContent, forKey: .currentContent)
+        try container.encode(drafts, forKey: .drafts)
+        try container.encode(workingDraft, forKey: .workingDraft)
+        try container.encode(lastModified, forKey: .lastModified)
+    }
+    
+    // MARK: - Equatable Conformance
+    static func == (lhs: Document, rhs: Document) -> Bool {
+        lhs.id == rhs.id
+    }
+    
+    func saveFirstDraft(name: String) {
+        let draft = Draft(
+            name: name,
+            content: currentContent,
+            comment: "Initial capture",
+            isFirstDraft: true
+        )
+        drafts.append(draft)
+        workingDraft = nil
+        lastModified = Date()
+    }
+    
+    func saveDraft(name: String, comment: String) {
+        let draft = Draft(
+            name: name,
+            content: currentContent,
+            comment: comment,
+            parentId: drafts.last?.id
+        )
+        drafts.append(draft)
+        workingDraft = nil
+        lastModified = Date()
+    }
+    
+    // FIX: Use async update to avoid "Publishing changes from within view updates" warning
+    func updateWorkingDraft() {
+        // Schedule the update for the next run loop to avoid SwiftUI state conflicts
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.workingDraft = WorkingDraft(content: self.currentContent)
+            self.lastModified = Date()
+        }
+    }
+    
+    func restoreDraft(_ draft: Draft) {
+        currentContent = draft.content
+        // FIX: Call updateWorkingDraft which now handles async properly
+        updateWorkingDraft()
+    }
+    
+    var hasUnsavedChanges: Bool {
+        guard let lastDraft = drafts.last else {
+            return !currentContent.isEmpty
+        }
+        return currentContent != lastDraft.content
+    }
+    
+    var latestDraft: Draft? {
+        return drafts.last
+    }
+}
+
+
+==================================================
+FILE: Thesis/EditCommand.swift
+==================================================
+
+import Foundation
+
+struct UndoCommand {
+    let beforeContent: String
+    let afterContent: String
+    let cursorBefore: Int
+    let cursorAfter: Int
+    
+    func undo(in content: inout String) -> Int? {
+        content = beforeContent
+        return cursorBefore
+    }
+}
+
+class UndoStack {
+    private var commands: [UndoCommand] = []
+    private let maxSize = 10
+    
+    func push(_ command: UndoCommand) {
+        commands.append(command)
+        if commands.count > maxSize {
+            commands.removeFirst()
+        }
+    }
+    
+    func pop() -> UndoCommand? {
+        guard !commands.isEmpty else { return nil }
+        return commands.removeLast()
+    }
+    
+    func clear() {
+        commands.removeAll()
+    }
+    
+    var canUndo: Bool {
+        return !commands.isEmpty
+    }
+    
+    var count: Int {
+        return commands.count
+    }
+}
+
+
+==================================================
+FILE: Thesis/ContentView.swift
+==================================================
+
+import SwiftUI
+
+struct ContentView: View {
+    @EnvironmentObject var documentManager: DocumentManager
+    @State private var showingHistory = false
+    
+    var body: some View {
+        HSplitView {
+            // Sidebar - Document list
+            DocumentSidebar(
+                documents: documentManager.documents,
+                selectedDocument: $documentManager.selectedDocument,
+                onNewDocument: {
+                    documentManager.createNewDocument()
+                },
+                onDeleteDocument: { doc in
+                    documentManager.deleteDocument(doc)
+                }
+            )
+            .frame(minWidth: 220, idealWidth: 260, maxWidth: 320)
+            
+            // Main editor area
+            if let document = documentManager.selectedDocument {
+                EditorContainer(
+                    document: document,
+                    showingHistory: $showingHistory,
+                    onSave: {
+                        documentManager.saveDocuments()
+                    }
+                )
+            } else {
+                EmptyStateView(
+                    onNewDocument: {
+                        documentManager.createNewDocument()
+                    }
+                )
+            }
+        }
+        // FIX: Updated onChange syntax for macOS 14+
+        .onChange(of: documentManager.selectedDocument) {
+            documentManager.saveDocuments()
+        }
+    }
+}
+
+// MARK: - Document Sidebar
+
+struct DocumentSidebar: View {
+    let documents: [Document]
+    @Binding var selectedDocument: Document?
+    let onNewDocument: () -> Void
+    let onDeleteDocument: (Document) -> Void
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack {
+                Text("Thoughts")
+                    .font(.headline)
+                Spacer()
+                Button(action: onNewDocument) {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderless)
+            }
+            .padding()
+            .background(Color(NSColor.controlBackgroundColor))
+            
+            Divider()
+            
+            // Document list
+            List(documents) { doc in
+                DocumentListItem(
+                    document: doc,
+                    isSelected: selectedDocument?.id == doc.id
+                )
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    selectedDocument = doc
+                }
+                .contextMenu {
+                    Button("Delete", role: .destructive) {
+                        onDeleteDocument(doc)
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+        }
+    }
+}
+
+struct DocumentListItem: View {
+    @ObservedObject var document: Document
+    let isSelected: Bool
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(document.title)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                
+                if document.hasUnsavedChanges {
+                    Circle()
+                        .fill(Color.orange)
+                        .frame(width: 6, height: 6)
+                }
+            }
+            
+            HStack {
+                if let latest = document.latestDraft {
+                    Text(latest.name)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                } else {
+                    Text("No draft")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                Text(document.lastModified, style: .relative)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Editor Container
+
+struct EditorContainer: View {
+    @ObservedObject var document: Document
+    @Binding var showingHistory: Bool
+    let onSave: () -> Void
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Title bar
+            HStack {
+                TextField("Thought title", text: $document.title)
+                    .textFieldStyle(.plain)
+                    .font(.title2)
+                    .padding()
+                
+                Spacer()
+                
+                Button(action: {
+                    showingHistory.toggle()
+                }) {
+                    Label(showingHistory ? "Hide History" : "Show History",
+                          systemImage: showingHistory ? "clock.fill" : "clock")
+                }
+                .buttonStyle(.borderless)
+                .padding()
+            }
+            .background(Color(NSColor.controlBackgroundColor))
+            
+            Divider()
+            
+            // Editor with optional history
+            HSplitView {
+                // Main editor
+                ModalEditor(document: .constant(document))
+                    .frame(minWidth: 500)
+                
+                // History sidebar (when visible)
+                if showingHistory {
+                    DraftHistoryView(
+                        document: document,
+                        onRestore: { draft in
+                            document.restoreDraft(draft)
+                            onSave()
+                        },
+                        onClose: {
+                            showingHistory = false
+                        }
+                    )
+                    .frame(minWidth: 280, idealWidth: 340, maxWidth: 400)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Empty State
+
+struct EmptyStateView: View {
+    let onNewDocument: () -> Void
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "doc.text")
+                .font(.system(size: 64))
+                .foregroundColor(.secondary)
+            
+            Text("No Thought Selected")
+                .font(.title2)
+                .foregroundColor(.secondary)
+            
+            Text("Create a new thought or select one from the sidebar")
+                .font(.body)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+            
+            Button(action: onNewDocument) {
+                Label("New Thought", systemImage: "plus.circle.fill")
+                    .font(.headline)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Preview
+
+struct ContentView_Previews: PreviewProvider {
+    static var previews: some View {
+        ContentView()
+            .environmentObject(DocumentManager())
+    }
+}
+
+
+==================================================
+FILE: Thesis/DiffGenerator.swift
+==================================================
+
+import Foundation
+
+struct DiffChange: Identifiable {
+    let id = UUID()
+    let type: ChangeType
+    let range: NSRange
+    let text: String
+    
+    enum ChangeType {
+        case addition
+        case deletion
+        case unchanged
+    }
+}
+
+class DiffGenerator {
+    
+    static func generateDiff(from oldText: String, to newText: String) -> [DiffChange] {
+        var changes: [DiffChange] = []
+        
+        // Simple line-by-line diff for MVP
+        let oldSentences = TextAnalyzer.getSentences(in: oldText)
+        let newSentences = TextAnalyzer.getSentences(in: newText)
+        
+        // Create a map of sentence text to track changes
+        let oldSentenceSet = Set(oldSentences.map { $0.text })
+        let newSentenceSet = Set(newSentences.map { $0.text })
+        
+        var currentLocation = 0
+        
+        // Process new sentences
+        for newSentence in newSentences {
+            let text = newSentence.text
+            
+            if oldSentenceSet.contains(text) {
+                // Unchanged
+                changes.append(DiffChange(
+                    type: .unchanged,
+                    range: NSRange(location: currentLocation, length: text.count),
+                    text: text
+                ))
+            } else {
+                // Addition
+                changes.append(DiffChange(
+                    type: .addition,
+                    range: NSRange(location: currentLocation, length: text.count),
+                    text: text
+                ))
+            }
+            
+            currentLocation += text.count
+        }
+        
+        // Find deletions (in old but not in new)
+        for oldSentence in oldSentences {
+            if !newSentenceSet.contains(oldSentence.text) {
+                changes.append(DiffChange(
+                    type: .deletion,
+                    range: oldSentence.range,
+                    text: oldSentence.text
+                ))
+            }
+        }
+        
+        // Sort by location
+        changes.sort { $0.range.location < $1.range.location }
+        
+        return changes
+    }
+    
+    static func getChangeIndices(in diff: [DiffChange]) -> [Int] {
+        return diff.enumerated()
+            .filter { $0.element.type != .unchanged }
+            .map { $0.offset }
+    }
+    
+    static func findNextChange(from currentIndex: Int, in diff: [DiffChange]) -> Int? {
+        let changeIndices = getChangeIndices(in: diff)
+        return changeIndices.first { $0 > currentIndex }
+    }
+    
+    static func findPreviousChange(from currentIndex: Int, in diff: [DiffChange]) -> Int? {
+        let changeIndices = getChangeIndices(in: diff)
+        return changeIndices.last { $0 < currentIndex }
+    }
+}
+
+
+==================================================
+FILE: Thesis/EditorMode.swift
+==================================================
+
+import SwiftUI
+
+enum EditorMode: Equatable {
+    case freeText        // Initial writing mode - full freedom
+    case edit            // Navigation and commands
+    case insert(InsertContext)  // Constrained insertion
+    case command(String) // Command entry (:comp, :print)
+    case comp            // Compare/diff view
+    
+    var displayName: String {
+        switch self {
+        case .freeText: return "FREE TEXT"
+        case .edit: return "EDIT"
+        case .insert: return "INSERT"
+        case .command: return "COMMAND"
+        case .comp: return "COMPARE"
+        }
+    }
+    
+    var borderColor: Color {
+        switch self {
+        case .freeText: return .green
+        case .edit: return .blue
+        case .insert: return .green
+        case .command: return .purple
+        case .comp: return .orange
+        }
+    }
+    
+    static func == (lhs: EditorMode, rhs: EditorMode) -> Bool {
+        switch (lhs, rhs) {
+        case (.freeText, .freeText): return true
+        case (.edit, .edit): return true
+        case (.insert, .insert): return true
+        case (.command, .command): return true
+        case (.comp, .comp): return true
+        default: return false
+        }
+    }
+}
+
+// MARK: - Insert Context
+
+enum InsertContext {
+    case word           // Exit on: space
+    case sentence       // Exit on: . ! ?
+    case paragraph      // Exit on: double newline
+    
+    var exitTriggers: [String] {
+        switch self {
+        case .word: return [" "]
+        case .sentence: return [".", "!", "?"]
+        case .paragraph: return ["\n\n"]
+        }
+    }
+}
+
