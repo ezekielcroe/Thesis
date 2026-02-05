@@ -48,7 +48,8 @@ struct ModalEditor: View {
                 stats: stats,
                 draftInfo: draftInfo,
                 hasUnsavedChanges: document.hasUnsavedChanges,
-                branchInfo: branchInfo  // BUGFIX #3: Show branch info
+                branchInfo: branchInfo,
+                diffInfo: currentDiffInfo
             )
         }
         .onAppear {
@@ -98,6 +99,23 @@ struct ModalEditor: View {
             return "Branching from: \(parent.name)"
         }
         return nil
+    }
+    
+    // Diff info for comp mode status bar
+    private var currentDiffInfo: StatusBar.DiffInfo? {
+        guard mode == .comp, !diffChanges.isEmpty else { return nil }
+        
+        let changeIndices = DiffGenerator.getChangeIndices(in: diffChanges)
+        guard !changeIndices.isEmpty else { return nil }
+        
+        // Find which change index we're at
+        let currentChangeArrayIndex = changeIndices.firstIndex(of: currentDiffIndex) ?? 0
+        
+        return StatusBar.DiffInfo(
+            currentIndex: currentChangeArrayIndex,
+            totalChanges: changeIndices.count,
+            currentChange: currentDiffIndex < diffChanges.count ? diffChanges[currentDiffIndex] : nil
+        )
     }
     
     private func updateStats() {
@@ -356,8 +374,13 @@ struct ModalEditor: View {
     private func moveToNextWord() {
         let words = TextAnalyzer.getWords(in: document.currentContent)
         
-        // Find the first word that starts AFTER the current cursor position
-        if let nextWord = words.first(where: { $0.range.location > cursorPosition }) {
+        // Find the current word (if cursor is inside one)
+        let currentWordEnd = words.first(where: {
+            NSLocationInRange(cursorPosition, $0.range)
+        }).map { $0.range.location + $0.range.length } ?? cursorPosition
+        
+        // Find the first word that starts AT OR AFTER the end of current word
+        if let nextWord = words.first(where: { $0.range.location >= currentWordEnd }) {
             cursorPosition = nextWord.range.location
         }
     }
@@ -366,6 +389,7 @@ struct ModalEditor: View {
         let words = TextAnalyzer.getWords(in: document.currentContent)
         
         // Find the last word that starts BEFORE the current cursor position
+        // If we're at the start of a word, go to the previous word
         if let prevWord = words.last(where: { $0.range.location < cursorPosition }) {
             cursorPosition = prevWord.range.location
         }
@@ -551,9 +575,14 @@ struct ModalEditor: View {
             // Next change
             if let next = DiffGenerator.findNextChange(from: currentDiffIndex, in: diffChanges) {
                 currentDiffIndex = next
-                // Move cursor to the change
+                // Move cursor to the change (use displayRange for deletions)
                 if currentDiffIndex < diffChanges.count {
-                    cursorPosition = diffChanges[currentDiffIndex].range.location
+                    let change = diffChanges[currentDiffIndex]
+                    if change.type == .deletion, let displayRange = change.displayRange {
+                        cursorPosition = displayRange.location
+                    } else {
+                        cursorPosition = change.range.location
+                    }
                 }
             }
             
@@ -561,9 +590,14 @@ struct ModalEditor: View {
             // Previous change
             if let prev = DiffGenerator.findPreviousChange(from: currentDiffIndex, in: diffChanges) {
                 currentDiffIndex = prev
-                // Move cursor to the change
+                // Move cursor to the change (use displayRange for deletions)
                 if currentDiffIndex < diffChanges.count {
-                    cursorPosition = diffChanges[currentDiffIndex].range.location
+                    let change = diffChanges[currentDiffIndex]
+                    if change.type == .deletion, let displayRange = change.displayRange {
+                        cursorPosition = displayRange.location
+                    } else {
+                        cursorPosition = change.range.location
+                    }
                 }
             }
             
@@ -651,6 +685,13 @@ struct StatusBar: View {
     let draftInfo: String
     let hasUnsavedChanges: Bool
     let branchInfo: String?  // BUGFIX #3: Show branch info
+    let diffInfo: DiffInfo?  // Show current change info in comp mode
+    
+    struct DiffInfo {
+        let currentIndex: Int
+        let totalChanges: Int
+        let currentChange: DiffChange?
+    }
     
     var body: some View {
         HStack(spacing: 16) {
@@ -670,26 +711,62 @@ struct StatusBar: View {
                     .foregroundColor(.secondary)
             }
             
-            // Draft info
-            Text(draftInfo)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(hasUnsavedChanges ? .orange : .secondary)
-            
-            if hasUnsavedChanges {
-                Text("*")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundColor(.orange)
-            }
-            
-            // BUGFIX #3: Branch indicator
-            if let branch = branchInfo {
-                Text(branch)
+            // Diff info (in comp mode)
+            if let diff = diffInfo {
+                HStack(spacing: 8) {
+                    Text("Change \(diff.currentIndex + 1)/\(diff.totalChanges)")
+                        .font(.system(size: 11, design: .monospaced))
+                    
+                    if let change = diff.currentChange {
+                        switch change.type {
+                        case .addition:
+                            Text("ADDED")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.green)
+                                .cornerRadius(3)
+                        case .deletion:
+                            Text("DELETED: \"\(change.text.prefix(30))\(change.text.count > 30 ? "..." : "")\"")
+                                .font(.system(size: 10))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.red)
+                                .cornerRadius(3)
+                                .lineLimit(1)
+                        case .unchanged:
+                            EmptyView()
+                        }
+                    }
+                    
+                    Text("(n: next, p: prev, ESC: exit)")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                // Draft info (when not in comp mode)
+                Text(draftInfo)
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(.purple)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 2)
-                    .background(Color.purple.opacity(0.15))
-                    .cornerRadius(4)
+                    .foregroundColor(hasUnsavedChanges ? .orange : .secondary)
+                
+                if hasUnsavedChanges {
+                    Text("*")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.orange)
+                }
+                
+                // BUGFIX #3: Branch indicator
+                if let branch = branchInfo {
+                    Text(branch)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.purple)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(Color.purple.opacity(0.15))
+                        .cornerRadius(4)
+                }
             }
             
             Spacer()
@@ -761,8 +838,14 @@ struct FirstDraftSheet: View {
 struct PrintDraftSheet: View {
     @State private var draftName: String = ""
     @State private var comment: String = ""
+    @FocusState private var focusedField: Field?
     let onSave: (String, String) -> Void
     @Environment(\.dismiss) var dismiss
+    
+    enum Field {
+        case name
+        case comment
+    }
     
     var body: some View {
         VStack(spacing: 20) {
@@ -776,9 +859,22 @@ struct PrintDraftSheet: View {
             
             TextField("Draft name", text: $draftName)
                 .textFieldStyle(.roundedBorder)
+                .focused($focusedField, equals: .name)
+                .onSubmit {
+                    // Move to comment field on Enter
+                    focusedField = .comment
+                }
             
             TextField("What changed in your thinking?", text: $comment)
                 .textFieldStyle(.roundedBorder)
+                .focused($focusedField, equals: .comment)
+                .onSubmit {
+                    // Save on Enter if both fields filled
+                    if !draftName.isEmpty && !comment.isEmpty {
+                        dismiss()
+                        onSave(draftName, comment)
+                    }
+                }
             
             HStack(spacing: 12) {
                 Button("Cancel") {
@@ -792,11 +888,14 @@ struct PrintDraftSheet: View {
                         onSave(draftName, comment)
                     }
                 }
-                .keyboardShortcut(.return)
                 .disabled(draftName.isEmpty || comment.isEmpty)
             }
         }
         .padding(24)
         .frame(width: 450)
+        .onAppear {
+            // Focus the name field on appear
+            focusedField = .name
+        }
     }
 }

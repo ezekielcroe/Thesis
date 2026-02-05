@@ -116,31 +116,46 @@ struct EditorTextView: NSViewRepresentable {
     private func renderDiffHighlights(textView: CustomTextView) {
         guard let layoutManager = textView.layoutManager else { return }
         
-        let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+        let textLength = (textView.string as NSString).length
+        let fullRange = NSRange(location: 0, length: textLength)
         
         // Clear existing temporary attributes
         layoutManager.removeTemporaryAttribute(.backgroundColor, forCharacterRange: fullRange)
+        layoutManager.removeTemporaryAttribute(.underlineStyle, forCharacterRange: fullRange)
+        layoutManager.removeTemporaryAttribute(.underlineColor, forCharacterRange: fullRange)
         
-        // Apply new highlights for diff changes
+        // Apply highlights for diff changes
         for change in diffChanges {
-            // Validate range is within bounds
-            guard change.range.location + change.range.length <= (textView.string as NSString).length else {
-                continue
-            }
-            
             switch change.type {
             case .addition:
+                // Validate range is within bounds
+                guard change.range.location + change.range.length <= textLength else {
+                    continue
+                }
                 // Green background for added text
                 layoutManager.addTemporaryAttribute(
                     .backgroundColor,
-                    value: NSColor.systemGreen.withAlphaComponent(0.25),
+                    value: NSColor.systemGreen.withAlphaComponent(0.3),
                     forCharacterRange: change.range
                 )
+                
             case .deletion:
-                // Deletions are text that existed in old but not in new
-                // We can't highlight text that doesn't exist in the current buffer
-                // For MVP, we skip deletion highlighting (would need split view)
-                break
+                // Show a red underline at the position where text was deleted
+                // Use displayRange which indicates where in the new text to show the marker
+                if let displayRange = change.displayRange {
+                    // Mark a small range (or the character before) with red to indicate deletion occurred here
+                    let markerStart = min(displayRange.location, textLength > 0 ? textLength - 1 : 0)
+                    let markerLength = min(1, textLength - markerStart)
+                    if markerLength > 0 {
+                        let markerRange = NSRange(location: markerStart, length: markerLength)
+                        layoutManager.addTemporaryAttribute(
+                            .backgroundColor,
+                            value: NSColor.systemRed.withAlphaComponent(0.2),
+                            forCharacterRange: markerRange
+                        )
+                    }
+                }
+                
             case .unchanged:
                 // No highlighting for unchanged text
                 break
@@ -152,6 +167,8 @@ struct EditorTextView: NSViewRepresentable {
         guard let layoutManager = textView.layoutManager else { return }
         let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
         layoutManager.removeTemporaryAttribute(.backgroundColor, forCharacterRange: fullRange)
+        layoutManager.removeTemporaryAttribute(.underlineStyle, forCharacterRange: fullRange)
+        layoutManager.removeTemporaryAttribute(.underlineColor, forCharacterRange: fullRange)
     }
     
     func makeCoordinator() -> Coordinator {
@@ -184,14 +201,10 @@ struct EditorTextView: NSViewRepresentable {
         
         func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
             
-            // DEBUG: Log every call to verify delegate is working
-            print("[shouldChangeTextIn] Mode: \(parent.mode), Input: '\(replacementString ?? "nil")'")
-            
             // Handle based on current mode
             switch parent.mode {
             case .freeText:
                 // Allow all typing in free text mode
-                print("[shouldChangeTextIn] FreeText mode - allowing")
                 return true
                 
             case .insert(let context):
@@ -199,29 +212,24 @@ struct EditorTextView: NSViewRepresentable {
                 
                 // Always allow backspace/deletion
                 if input.isEmpty {
-                    print("[shouldChangeTextIn] Insert mode - backspace/deletion allowed")
                     return true
                 }
-                
-                print("[shouldChangeTextIn] Insert mode context: \(context), checking triggers...")
                 
                 // BUGFIX #2: Check exit triggers BEFORE allowing the character
                 switch context {
                 case .word:
-                    // Exit on space or newline - BLOCK the character
+                    // Exit on space or newline - ALLOW the space, then exit
                     if input == " " || input == "\n" {
-                        print("[shouldChangeTextIn] WORD MODE: Space/newline detected - triggering exit!")
                         // Switch mode asynchronously to avoid state modification during view update
                         DispatchQueue.main.async {
                             self.parent.onModeChange(.edit)
                         }
-                        return false  // Block the space/newline from being typed
+                        return true  // Allow the space/newline to be typed, then exit
                     }
                     
                 case .sentence:
                     // Exit AFTER punctuation - ALLOW the character, then exit
                     if input == "." || input == "!" || input == "?" {
-                        print("[shouldChangeTextIn] SENTENCE MODE: Punctuation detected - allowing then exit!")
                         DispatchQueue.main.async {
                             self.parent.onModeChange(.edit)
                         }
@@ -233,14 +241,12 @@ struct EditorTextView: NSViewRepresentable {
                     if input == "\n" {
                         let currentPos = parent.cursorPosition
                         let textLength = (parent.text as NSString).length
-                        print("[shouldChangeTextIn] PARAGRAPH MODE: Newline at pos \(currentPos), lastNewline: \(lastNewlinePosition)")
                         
                         // Check if the character before cursor is also a newline
                         let hasNewlineBefore = currentPos > 0 && textLength > 0 &&
                             (parent.text as NSString).substring(with: NSRange(location: currentPos - 1, length: 1)) == "\n"
                         
                         if hasNewlineBefore {
-                            print("[shouldChangeTextIn] PARAGRAPH MODE: Double newline detected - triggering exit!")
                             DispatchQueue.main.async {
                                 self.parent.onModeChange(.edit)
                             }
@@ -255,13 +261,11 @@ struct EditorTextView: NSViewRepresentable {
                     }
                 }
                 
-                print("[shouldChangeTextIn] Insert mode - allowing character '\(input)'")
                 return true  // Allow all other characters in insert mode
                 
             case .edit, .comp, .command:
                 // BUGFIX #1: Block ALL text changes in non-typing modes
                 // This makes the view "virtually read-only" while keeping cursor visible
-                print("[shouldChangeTextIn] Edit/Comp/Command mode - blocking")
                 return false
             }
         }
@@ -315,12 +319,8 @@ class CustomTextView: NSTextView {
     override func keyDown(with event: NSEvent) {
         let mode = actualMode  // Use binding-backed mode for real-time accuracy
         
-        // DEBUG
-        print("[CustomTextView.keyDown] actualMode: \(mode), currentMode: \(currentMode), characters: '\(event.characters ?? "nil")'")
-        
         // Handle ESC specially - always send to parent
         if event.keyCode == 53 { // ESC key
-            print("[CustomTextView.keyDown] ESC detected - sending to parent")
             coordinator?.parent.onKeyPress("\u{1B}", event.modifierFlags)
             return
         }
@@ -328,7 +328,6 @@ class CustomTextView: NSTextView {
         // For edit/comp/command modes, intercept ALL keys and send to parent handler
         switch mode {
         case .edit, .comp, .command:
-            print("[CustomTextView.keyDown] Non-insert mode (\(mode)) - routing to parent")
             if let characters = event.characters {
                 coordinator?.parent.onKeyPress(characters, event.modifierFlags)
             }
@@ -338,7 +337,6 @@ class CustomTextView: NSTextView {
         case .insert, .freeText:
             // For insert/freeText modes, let NSTextView handle normally
             // The shouldChangeTextIn delegate will filter based on context
-            print("[CustomTextView.keyDown] Insert/FreeText mode (\(mode)) - calling super.keyDown")
             super.keyDown(with: event)
         }
     }
