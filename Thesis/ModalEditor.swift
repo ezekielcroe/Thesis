@@ -404,52 +404,66 @@ struct ModalEditor: View {
             }
             flashCursor()
         }
-    
+
     // MARK: - Delete Commands
-    
-    // ENHANCED: Deletes word + trailing space
-    private func executeDeleteWordEnhanced(forward: Bool) {
-        let words = TextAnalyzer.getWords(in: document.currentContent)
-        let nsText = document.currentContent as NSString
         
-        var wordToDelete: TextUnit?
-        if forward {
-            wordToDelete = words.first(where: { $0.range.location + $0.range.length > cursorPosition })
-        } else {
-            wordToDelete = words.last(where: { $0.range.location < cursorPosition })
-        }
-        
-        guard let word = wordToDelete else { return }
-        let deletedText = word.text
-        var deleteRange = word.range
-        
-        // BUGFIX: Consume trailing spaces
-        var endPos = deleteRange.location + deleteRange.length
-        while endPos < nsText.length {
-            let nextCharRange = NSRange(location: endPos, length: 1)
-            let nextChar = nsText.substring(with: nextCharRange)
-            if nextChar == " " {
-                deleteRange.length += 1
-                endPos += 1
+        // ENHANCED: Deletes word + trailing space (Filters out whitespace tokens)
+        private func executeDeleteWordEnhanced(forward: Bool) {
+            let words = TextAnalyzer.getWords(in: document.currentContent)
+            let nsText = document.currentContent as NSString
+            
+            var wordToDelete: TextUnit?
+            
+            if forward {
+                // Forward: Find first non-empty word overlapping or after cursor
+                wordToDelete = words.first(where: {
+                    $0.range.location + $0.range.length > cursorPosition &&
+                    !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                })
             } else {
-                break
+                // Backward: Find last non-empty word starting strictly before cursor
+                // This skips the "whitespace word" immediately behind the cursor
+                wordToDelete = words.last(where: {
+                    $0.range.location < cursorPosition &&
+                    !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                })
+            }
+            
+            guard let word = wordToDelete else { return }
+            
+            let deletedText = word.text
+            var deleteRange = word.range
+            
+            // CONSUME TRAILING SPACES
+            // This extends the deletion range to include spaces after the word.
+            // For 'db', this ensures "Word1 Word2 |" deletes "Word2 " (word + gap).
+            var endPos = deleteRange.location + deleteRange.length
+            while endPos < nsText.length {
+                let nextCharRange = NSRange(location: endPos, length: 1)
+                let nextChar = nsText.substring(with: nextCharRange)
+                
+                if nextChar == " " {
+                    deleteRange.length += 1
+                    endPos += 1
+                } else {
+                    break
+                }
+            }
+            
+            highlightRangeBriefly(deleteRange) {
+                self.deleteRange(deleteRange, trackAsChange: false)
+                
+                let change = SemanticChange(
+                    type: .deleted,
+                    unitType: .word,
+                    beforeText: deletedText,
+                    afterText: nil,
+                    position: self.cursorPosition,
+                    context: "deleted word '\(deletedText)'"
+                )
+                self.document.recordChange(change)
             }
         }
-        
-        highlightRangeBriefly(deleteRange) {
-            self.deleteRange(deleteRange, trackAsChange: false)
-            
-            let change = SemanticChange(
-                type: .deleted,
-                unitType: .word,
-                beforeText: deletedText,
-                afterText: nil,
-                position: self.cursorPosition,
-                context: "deleted word '\(deletedText)'"
-            )
-            self.document.recordChange(change)
-        }
-    }
     
     private func executeDeleteSentence() {
         guard let sentence = TextAnalyzer.getSentenceAt(position: cursorPosition, in: document.currentContent) else { return }
