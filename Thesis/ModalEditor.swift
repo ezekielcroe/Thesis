@@ -10,12 +10,16 @@ struct TextStats {
 
 struct ModalEditor: View {
     @Binding var document: Document
-    @State private var mode: EditorMode = .freeText  // Start in FREE TEXT
+    @State private var mode: EditorMode = .freeText
     @State private var commandBuffer: String = ""
     @State private var insertContext: InsertContext?
-    @State private var lastNewlinePosition: Int = -1  // For paragraph mode
+    @State private var lastNewlinePosition: Int = -1
     @State private var pendingCommand: PendingCommand?
-    @State private var highlightRange: NSRange?
+    
+    // SEPARATE Highlight types
+    @State private var highlightRange: NSRange? // For RED deletion previews
+    @State private var flashRange: NSRange?     // For YELLOW navigation flashes
+    
     @State private var cursorPosition: Int = 0
     @State private var undoStack = UndoStack()
     @State private var showingFirstDraftSheet = false
@@ -23,6 +27,10 @@ struct ModalEditor: View {
     @State private var diffChanges: [DiffChange] = []
     @State private var currentDiffIndex: Int = 0
     @State private var stats: TextStats = TextStats(paragraphCount: 0, sentenceCount: 0, wordCount: 0)
+    
+    // ENHANCED: Tracking semantic changes
+    @State private var pendingChangeTracker = PendingChangeTracker()
+    @State private var sessionChanges: [SemanticChange] = []
     
     var body: some View {
         VStack(spacing: 0) {
@@ -33,10 +41,11 @@ struct ModalEditor: View {
                     mode: $mode,
                     cursorPosition: $cursorPosition,
                     highlightRange: $highlightRange,
-                    diffChanges: $diffChanges,  // BUGFIX #4: Pass diff changes for rendering
+                    flashRange: $flashRange, // NEW: Pass flash range
+                    diffChanges: $diffChanges,
                     onTextChange: { handleTextChange() },
                     onKeyPress: { key, modifiers in handleKeyPress(key, modifiers: modifiers) },
-                    onModeChange: { newMode in handleModeChange(newMode) }  // BUGFIX #2: Handle mode changes from delegate
+                    onModeChange: { newMode in handleModeChange(newMode) }
                 )
                 .border(mode.borderColor, width: 3)
             }
@@ -56,7 +65,6 @@ struct ModalEditor: View {
             DispatchQueue.main.async {
                 updateStats()
             }
-            // Start in FREE TEXT if no drafts, EDIT if we have drafts
             if !document.drafts.isEmpty {
                 mode = .edit
             }
@@ -93,7 +101,6 @@ struct ModalEditor: View {
         return "No draft saved"
     }
     
-    // BUGFIX #3: Display branch information
     private var branchInfo: String? {
         if document.isBranching, let parent = document.currentBranchParent {
             return "Branching from: \(parent.name)"
@@ -101,14 +108,12 @@ struct ModalEditor: View {
         return nil
     }
     
-    // Diff info for comp mode status bar
     private var currentDiffInfo: StatusBar.DiffInfo? {
         guard mode == .comp, !diffChanges.isEmpty else { return nil }
         
         let changeIndices = DiffGenerator.getChangeIndices(in: diffChanges)
         guard !changeIndices.isEmpty else { return nil }
         
-        // Find which change index we're at
         let currentChangeArrayIndex = changeIndices.firstIndex(of: currentDiffIndex) ?? 0
         
         return StatusBar.DiffInfo(
@@ -119,19 +124,16 @@ struct ModalEditor: View {
     }
     
     private func updateStats() {
-        // Calculate stats using TextAnalyzer
         let paragraphs = TextAnalyzer.getParagraphs(in: document.currentContent)
         let sentences = TextAnalyzer.getSentences(in: document.currentContent)
         let words = TextAnalyzer.getWords(in: document.currentContent)
         
-        // Create the stats object
         let newStats = TextStats(
             paragraphCount: paragraphs.count,
             sentenceCount: sentences.count,
             wordCount: words.count
         )
         
-        // FIX: Defer state modification to avoid "modifying state during view update"
         DispatchQueue.main.async {
             self.stats = newStats
         }
@@ -142,7 +144,6 @@ struct ModalEditor: View {
             self.updateStats()
         }
         
-        // Use a switch to match .edit OR any case of .insert
         switch mode {
         case .insert, .edit:
             document.updateWorkingDraft()
@@ -151,9 +152,19 @@ struct ModalEditor: View {
         }
     }
     
-    // BUGFIX #2: Handle mode changes triggered by the delegate
     private func handleModeChange(_ newMode: EditorMode) {
+        // ENHANCED: Fixed Tuple Switch for Exit Logic
+        switch (mode, newMode) {
+        case (.insert, .insert):
+            break // Context change only
+        case (.insert, _):
+            completeInsertMode() // Exiting insert mode
+        default:
+            break
+        }
+        
         mode = newMode
+        
         if newMode == .edit {
             insertContext = nil
             lastNewlinePosition = -1
@@ -161,13 +172,11 @@ struct ModalEditor: View {
     }
     
     private func handleKeyPress(_ characters: String, modifiers: NSEvent.ModifierFlags) {
-        // Handle Cmd+D for comp mode (only in EDIT mode)
         if modifiers.contains(.command) && characters == "d" && mode == .edit {
             enterCompMode()
             return
         }
         
-        // Handle Cmd+S for print (only in EDIT mode)
         if modifiers.contains(.command) && characters == "s" && mode == .edit {
             if document.latestDraft != nil {
                 showingPrintSheet = true
@@ -192,29 +201,41 @@ struct ModalEditor: View {
     // MARK: - FREE TEXT Mode Handler
 
     private func handleFreeTextMode(_ characters: String) {
-        // Only ESC exits - everything else is passed to editor
         if characters == "\u{1B}" { // ESC
             if !document.currentContent.isEmpty {
                 showingFirstDraftSheet = true
             }
         }
-        // All other keys pass through naturally
     }
     
     // MARK: - Insert Mode
-    // Note: Exit trigger logic is now handled in EditorTextView.Coordinator.shouldChangeTextIn
-    // This handler is now simplified since the delegate handles exit conditions
 
     private func handleInsertMode(_ characters: String, context: InsertContext) {
-        // ESC always exits to EDIT
         if characters == "\u{1B}" {
-            mode = .edit
-            insertContext = nil
+            completeInsertMode()
             return
         }
+    }
+    
+    private func completeInsertMode() {
+        if pendingChangeTracker.hasPending {
+            let insertedText = getRecentlyInsertedText()
+            if let completedChange = pendingChangeTracker.completeChange(afterText: insertedText) {
+                document.recordChange(completedChange)
+            }
+        }
         
-        // All other character handling is done by the delegate's shouldChangeTextIn
-        // The delegate blocks/allows characters and triggers mode changes as needed
+        mode = .edit
+        insertContext = nil
+    }
+    
+    private func getRecentlyInsertedText() -> String {
+        if let sentence = TextAnalyzer.getSentenceAt(position: cursorPosition, in: document.currentContent) {
+            return sentence.text
+        } else if let word = TextAnalyzer.getWordAt(position: cursorPosition, in: document.currentContent) {
+            return word.text
+        }
+        return ""
     }
 
     // MARK: - Edit Mode
@@ -222,79 +243,42 @@ struct ModalEditor: View {
     private func handleEditMode(_ characters: String, modifiers: NSEvent.ModifierFlags) {
         guard let char = characters.first else { return }
         
-        // Check for multi-character commands first
         if !commandBuffer.isEmpty {
             let combined = commandBuffer + String(char)
             
-            // Two-character commands
-            if combined == "dw" {
-                executeDeleteWord(forward: true)
-                commandBuffer = ""
-                return
-            } else if combined == "db" {
-                executeDeleteWord(forward: false)
-                commandBuffer = ""
-                return
-            } else if combined == "cw" {
-                executeChangeWord()
-                commandBuffer = ""
-                return
-            }
+            if combined == "dw" { executeDeleteWordEnhanced(forward: true); commandBuffer = ""; return }
+            if combined == "db" { executeDeleteWordEnhanced(forward: false); commandBuffer = ""; return }
             
-            // Partial three-character commands
+            if combined == "cw" { executeChangeWord(); commandBuffer = ""; return }
+            
+            if combined == "rs" { executeRefineSentence(); commandBuffer = ""; return }
+            if combined == "rw" { executeRefineWord(); commandBuffer = ""; return }
+            if combined == "rp" { executeRefineParagraph(); commandBuffer = ""; return }
+            
             if combined == "da" || combined == "ca" {
                 commandBuffer = combined
                 return
             }
             
-            // Complete three-character commands
-            if combined == "das" {
-                executeDeleteSentence()
-                commandBuffer = ""
-                return
-            } else if combined == "dap" {
-                executeDeleteParagraph()
-                commandBuffer = ""
-                return
-            } else if combined == "cas" {
-                executeChangeSentence()
-                commandBuffer = ""
-                return
-            } else if combined == "cap" {
-                executeChangeParagraph()
-                commandBuffer = ""
-                return
-            }
+            if combined == "das" { executeDeleteSentence(); commandBuffer = ""; return }
+            if combined == "dap" { executeDeleteParagraph(); commandBuffer = ""; return }
+            if combined == "cas" { executeChangeSentence(); commandBuffer = ""; return }
+            if combined == "cap" { executeChangeParagraph(); commandBuffer = ""; return }
             
-            // Invalid combination - clear and process as single
             commandBuffer = ""
         }
         
-        // Single character commands
         switch char {
-        case "h":
-            moveToPreviousSentence()
-            
-        case "l":
-            moveToNextSentence()
-            
-        case "j":
-            moveToNextParagraph()
-            
-        case "k":
-            moveToPreviousParagraph()
+        case "h": moveToPreviousSentence()
+        case "l": moveToNextSentence()
+        case "j": moveToNextParagraph()
+        case "k": moveToPreviousParagraph()
             
         case "w":
-            if commandBuffer.isEmpty {
-                moveToNextWord()
-            }
-            // If buffer has 'd' or 'c', this completes 'dw' or 'cw' (handled above)
+            if commandBuffer.isEmpty { moveToNextWord() }
             
         case "b":
-            if commandBuffer.isEmpty {
-                moveToPreviousWord()
-            }
-            // If buffer has 'd', this completes 'db' (handled above)
+            if commandBuffer.isEmpty { moveToPreviousWord() }
             
         case "d":
             if modifiers.contains(.shift) {
@@ -310,26 +294,31 @@ struct ModalEditor: View {
                 commandBuffer = "c"
             }
             
+        case "r":
+            if modifiers.contains(.shift) {
+                executeRefineToEnd()
+            } else {
+                commandBuffer = "r"
+            }
+            
         case "i":
+            pendingChangeTracker.startChange(
+                 type: .added,
+                 unitType: .word,
+                 beforeText: nil,
+                 position: cursorPosition,
+                 context: "insert"
+            )
             mode = .insert(.word)
             insertContext = .word
             commandBuffer = ""
             
         case "a":
             if commandBuffer.isEmpty {
-                mode = .insert(.sentence)
-                insertContext = .sentence
+                executeAppendSentence()
             }
-            // If buffer is 'd' or 'c', keep waiting for 's' or 'p'
             
-        case "s":
-            // Only valid after 'da' or 'ca'
-            // Will be handled by multi-char check above
-            break
-            
-        case "p":
-            // Only valid after 'da' or 'ca'
-            // Will be handled by multi-char check above
+        case "s", "p":
             break
             
         case "u":
@@ -345,129 +334,181 @@ struct ModalEditor: View {
         }
     }
     
-    // MARK: - Navigation Commands
-    
-    private func moveToPreviousSentence() {
-        if let prev = TextAnalyzer.getPreviousSentence(from: cursorPosition, in: document.currentContent) {
-            cursorPosition = prev.range.location
+    // MARK: - Navigation Commands (Updated with Flash)
+        // Same logic, just ensure they call flashCursor()
+        
+        private func moveToPreviousSentence() {
+            if let prev = TextAnalyzer.getPreviousSentence(from: cursorPosition, in: document.currentContent) {
+                cursorPosition = prev.range.location
+                flashCursor()
+            }
         }
-    }
 
-    private func moveToNextSentence() {
-        if let next = TextAnalyzer.getNextSentence(from: cursorPosition, in: document.currentContent) {
-            cursorPosition = next.range.location
+        private func moveToNextSentence() {
+            if let next = TextAnalyzer.getNextSentence(from: cursorPosition, in: document.currentContent) {
+                cursorPosition = next.range.location
+                flashCursor()
+            }
         }
-    }
 
-    private func moveToPreviousParagraph() {
-        if let prev = TextAnalyzer.getPreviousParagraph(from: cursorPosition, in: document.currentContent) {
-            cursorPosition = prev.range.location
+        private func moveToPreviousParagraph() {
+            if let prev = TextAnalyzer.getPreviousParagraph(from: cursorPosition, in: document.currentContent) {
+                cursorPosition = prev.range.location
+                flashCursor()
+            }
         }
-    }
 
-    private func moveToNextParagraph() {
-        if let next = TextAnalyzer.getNextParagraph(from: cursorPosition, in: document.currentContent) {
-            cursorPosition = next.range.location
+        private func moveToNextParagraph() {
+            if let next = TextAnalyzer.getNextParagraph(from: cursorPosition, in: document.currentContent) {
+                cursorPosition = next.range.location
+                flashCursor()
+            }
         }
-    }
 
     private func moveToNextWord() {
-        let words = TextAnalyzer.getWords(in: document.currentContent)
-        
-        // Find the current word (if cursor is inside one)
-        let currentWordEnd = words.first(where: {
-            NSLocationInRange(cursorPosition, $0.range)
-        }).map { $0.range.location + $0.range.length } ?? cursorPosition
-        
-        // Find the first word that starts AT OR AFTER the end of current word
-        if let nextWord = words.first(where: { $0.range.location >= currentWordEnd }) {
-            cursorPosition = nextWord.range.location
+            let words = TextAnalyzer.getWords(in: document.currentContent)
+            
+            // LOGIC CHANGE: Filter out whitespace tokens so we skip " " and jump to "is"
+            if let nextWord = words.first(where: { word in
+                word.range.location > cursorPosition &&
+                !word.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }) {
+                cursorPosition = nextWord.range.location
+            } else {
+                cursorPosition = document.currentContent.count
+            }
+            flashCursor()
         }
-    }
 
     private func moveToPreviousWord() {
-        let words = TextAnalyzer.getWords(in: document.currentContent)
-        
-        // Find the last word that starts BEFORE the current cursor position
-        // If we're at the start of a word, go to the previous word
-        if let prevWord = words.last(where: { $0.range.location < cursorPosition }) {
-            cursorPosition = prevWord.range.location
+            let words = TextAnalyzer.getWords(in: document.currentContent)
+            
+            // 1. Identify start of current word (if inside one)
+            let currentWordStart = words.first(where: {
+                NSLocationInRange(cursorPosition, $0.range) || $0.range.location == cursorPosition
+            })?.range.location ?? cursorPosition
+            
+            // 2. Find previous word, IGNORING whitespace tokens
+            if let prevWord = words.last(where: { word in
+                word.range.location < currentWordStart &&
+                !word.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }) {
+                cursorPosition = prevWord.range.location
+            } else if let firstWord = words.first(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
+                      cursorPosition > firstWord.range.location {
+                // Fallback: If we are past the first word but logic didn't catch it
+                cursorPosition = firstWord.range.location
+            } else {
+                // Start of doc
+                cursorPosition = 0
+            }
+            flashCursor()
         }
-    }
     
     // MARK: - Delete Commands
     
-    private func executeDeleteWord(forward: Bool) {
+    // ENHANCED: Deletes word + trailing space
+    private func executeDeleteWordEnhanced(forward: Bool) {
         let words = TextAnalyzer.getWords(in: document.currentContent)
         let nsText = document.currentContent as NSString
         
+        var wordToDelete: TextUnit?
         if forward {
-            // Find word at or after cursor
-            guard let word = words.first(where: { $0.range.location >= cursorPosition }) else { return }
-            
-            // Calculate range including trailing space
-            var deleteRange = word.range
-            let endPos = deleteRange.location + deleteRange.length
-            
-            // Include trailing space if it exists
-            if endPos < nsText.length {
-                let nextChar = nsText.substring(with: NSRange(location: endPos, length: 1))
-                if nextChar == " " || nextChar == "\n" {
-                    deleteRange.length += 1
-                }
-            }
-            
-            highlightRangeBriefly(deleteRange) {
-                self.deleteRange(deleteRange)
-            }
-            
+            wordToDelete = words.first(where: { $0.range.location + $0.range.length > cursorPosition })
         } else {
-            // Find word before cursor
-            guard let word = words.last(where: { $0.range.location + $0.range.length <= cursorPosition }) else { return }
-            
-            // Calculate range including leading space
-            var deleteRange = word.range
-            
-            // Include leading space if it exists
-            if deleteRange.location > 0 {
-                let prevChar = nsText.substring(with: NSRange(location: deleteRange.location - 1, length: 1))
-                if prevChar == " " || prevChar == "\n" {
-                    deleteRange.location -= 1
-                    deleteRange.length += 1
-                }
+            wordToDelete = words.last(where: { $0.range.location < cursorPosition })
+        }
+        
+        guard let word = wordToDelete else { return }
+        let deletedText = word.text
+        var deleteRange = word.range
+        
+        // BUGFIX: Consume trailing spaces
+        var endPos = deleteRange.location + deleteRange.length
+        while endPos < nsText.length {
+            let nextCharRange = NSRange(location: endPos, length: 1)
+            let nextChar = nsText.substring(with: nextCharRange)
+            if nextChar == " " {
+                deleteRange.length += 1
+                endPos += 1
+            } else {
+                break
             }
+        }
+        
+        highlightRangeBriefly(deleteRange) {
+            self.deleteRange(deleteRange, trackAsChange: false)
             
-            highlightRangeBriefly(deleteRange) {
-                self.deleteRange(deleteRange)
-            }
+            let change = SemanticChange(
+                type: .deleted,
+                unitType: .word,
+                beforeText: deletedText,
+                afterText: nil,
+                position: self.cursorPosition,
+                context: "deleted word '\(deletedText)'"
+            )
+            self.document.recordChange(change)
         }
     }
     
     private func executeDeleteSentence() {
         guard let sentence = TextAnalyzer.getSentenceAt(position: cursorPosition, in: document.currentContent) else { return }
+        let deletedText = sentence.text
         
         highlightRangeBriefly(sentence.range) {
-            deleteRange(sentence.range)
+            self.deleteRange(sentence.range, trackAsChange: false)
+            
+            let change = SemanticChange(
+                type: .deleted,
+                unitType: .sentence,
+                beforeText: deletedText,
+                afterText: nil,
+                position: self.cursorPosition,
+                context: "deleted sentence"
+            )
+            self.document.recordChange(change)
         }
     }
     
     private func executeDeleteParagraph() {
         guard let paragraph = TextAnalyzer.getParagraphAt(position: cursorPosition, in: document.currentContent) else { return }
+        let deletedText = paragraph.text
         
         highlightRangeBriefly(paragraph.range) {
-            deleteRange(paragraph.range)
+            self.deleteRange(paragraph.range, trackAsChange: false)
+            
+            let change = SemanticChange(
+                type: .deleted,
+                unitType: .paragraph,
+                beforeText: deletedText,
+                afterText: nil,
+                position: self.cursorPosition,
+                context: "deleted paragraph"
+            )
+            self.document.recordChange(change)
         }
     }
     
     private func executeDeleteToEnd() {
         guard let rest = TextAnalyzer.getRestOfSentence(from: cursorPosition, in: document.currentContent) else { return }
+        let deletedText = rest.text
         
         highlightRangeBriefly(rest.range) {
-            deleteRange(rest.range)
+            self.deleteRange(rest.range, trackAsChange: false)
+            
+            let change = SemanticChange(
+                type: .deleted,
+                unitType: .sentence,
+                beforeText: deletedText,
+                afterText: nil,
+                position: self.cursorPosition,
+                context: "deleted to end"
+            )
+            self.document.recordChange(change)
         }
     }
     
-    private func deleteRange(_ range: NSRange) {
+    private func deleteRange(_ range: NSRange, trackAsChange: Bool = true) {
         let beforeContent = document.currentContent
         let nsText = beforeContent as NSString
         let afterContent = nsText.replacingCharacters(in: range, with: "")
@@ -489,49 +530,196 @@ struct ModalEditor: View {
     
     private func executeChangeWord() {
         let words = TextAnalyzer.getWords(in: document.currentContent)
-        
-        // Find word at or immediately after cursor
+        // Check current or overlapping word
         guard let word = words.first(where: {
-            $0.range.location >= cursorPosition ||
-            NSLocationInRange(cursorPosition, $0.range)
+            NSLocationInRange(cursorPosition, $0.range) || $0.range.location >= cursorPosition
         }) else { return }
         
-        highlightRangeBriefly(word.range) {
-            deleteRange(word.range)
-            mode = .insert(.word)
-            insertContext = .word
+        let originalText = word.text
+        
+        // Use expanded range (with spaces) for the deletion part
+        let nsText = document.currentContent as NSString
+        var deleteRange = word.range
+        var endPos = deleteRange.location + deleteRange.length
+        while endPos < nsText.length {
+            let nextChar = nsText.substring(with: NSRange(location: endPos, length: 1))
+            if nextChar == " " { deleteRange.length += 1; endPos += 1 } else { break }
+        }
+        
+        pendingChangeTracker.startChange(
+            type: .replaced,
+            unitType: .word,
+            beforeText: originalText,
+            position: cursorPosition,
+            context: "word '\(originalText)'"
+        )
+        
+        highlightRangeBriefly(deleteRange) {
+            self.deleteRange(deleteRange, trackAsChange: false)
+            self.mode = .insert(.word)
+            self.insertContext = .word
         }
     }
 
-
     private func executeChangeSentence() {
         guard let sentence = TextAnalyzer.getSentenceAt(position: cursorPosition, in: document.currentContent) else { return }
+        let originalText = sentence.text
+        
+        pendingChangeTracker.startChange(
+            type: .replaced,
+            unitType: .sentence,
+            beforeText: originalText,
+            position: cursorPosition,
+            context: "sentence at position \(cursorPosition)"
+        )
         
         highlightRangeBriefly(sentence.range) {
-            deleteRange(sentence.range)
-            mode = .insert(.sentence)
-            insertContext = .sentence
+            self.deleteRange(sentence.range, trackAsChange: false)
+            self.mode = .insert(.sentence)
+            self.insertContext = .sentence
         }
     }
 
     private func executeChangeParagraph() {
         guard let paragraph = TextAnalyzer.getParagraphAt(position: cursorPosition, in: document.currentContent) else { return }
+        let originalText = paragraph.text
+        
+        pendingChangeTracker.startChange(
+            type: .replaced,
+            unitType: .paragraph,
+            beforeText: originalText,
+            position: cursorPosition,
+            context: "paragraph at position \(cursorPosition)"
+        )
         
         highlightRangeBriefly(paragraph.range) {
-            deleteRange(paragraph.range)
-            mode = .insert(.paragraph)
-            insertContext = .paragraph
+            self.deleteRange(paragraph.range, trackAsChange: false)
+            self.mode = .insert(.paragraph)
+            self.insertContext = .paragraph
         }
     }
 
     private func executeChangeToEnd() {
         guard let rest = TextAnalyzer.getRestOfSentence(from: cursorPosition, in: document.currentContent) else { return }
+        let originalText = rest.text
+        
+        pendingChangeTracker.startChange(
+            type: .replaced,
+            unitType: .sentence,
+            beforeText: originalText,
+            position: cursorPosition,
+            context: "to end of sentence"
+        )
         
         highlightRangeBriefly(rest.range) {
-            deleteRange(rest.range)
-            mode = .insert(.sentence)
-            insertContext = .sentence
+            self.deleteRange(rest.range, trackAsChange: false)
+            self.mode = .insert(.sentence)
+            self.insertContext = .sentence
         }
+    }
+    
+    // MARK: - Refine Commands
+    
+    private func executeRefineSentence() {
+        guard let sentence = TextAnalyzer.getSentenceAt(position: cursorPosition, in: document.currentContent) else { return }
+        let originalText = sentence.text
+        
+        pendingChangeTracker.startChange(
+            type: .refined,
+            unitType: .sentence,
+            beforeText: originalText,
+            position: cursorPosition,
+            context: "sentence at position \(cursorPosition)"
+        )
+        
+        highlightRangeBriefly(sentence.range) {
+            self.deleteRange(sentence.range, trackAsChange: false)
+            self.mode = .insert(.sentence)
+            self.insertContext = .sentence
+        }
+    }
+    
+    private func executeRefineWord() {
+        guard let word = TextAnalyzer.getWordAt(position: cursorPosition, in: document.currentContent) else { return }
+        let originalText = word.text
+        
+        // Consume spaces for refine word too
+        let nsText = document.currentContent as NSString
+        var deleteRange = word.range
+        var endPos = deleteRange.location + deleteRange.length
+        while endPos < nsText.length {
+            let nextChar = nsText.substring(with: NSRange(location: endPos, length: 1))
+            if nextChar == " " { deleteRange.length += 1; endPos += 1 } else { break }
+        }
+        
+        pendingChangeTracker.startChange(
+            type: .refined,
+            unitType: .word,
+            beforeText: originalText,
+            position: cursorPosition,
+            context: "word '\(originalText)'"
+        )
+        
+        highlightRangeBriefly(deleteRange) {
+            self.deleteRange(deleteRange, trackAsChange: false)
+            self.mode = .insert(.word)
+            self.insertContext = .word
+        }
+    }
+    
+    private func executeRefineParagraph() {
+        guard let paragraph = TextAnalyzer.getParagraphAt(position: cursorPosition, in: document.currentContent) else { return }
+        let originalText = paragraph.text
+        
+        pendingChangeTracker.startChange(
+            type: .refined,
+            unitType: .paragraph,
+            beforeText: originalText,
+            position: cursorPosition,
+            context: "paragraph at position \(cursorPosition)"
+        )
+        
+        highlightRangeBriefly(paragraph.range) {
+            self.deleteRange(paragraph.range, trackAsChange: false)
+            self.mode = .insert(.paragraph)
+            self.insertContext = .paragraph
+        }
+    }
+    
+    private func executeRefineToEnd() {
+        guard let rest = TextAnalyzer.getRestOfSentence(from: cursorPosition, in: document.currentContent) else { return }
+        let originalText = rest.text
+        
+        pendingChangeTracker.startChange(
+            type: .refined,
+            unitType: .sentence,
+            beforeText: originalText,
+            position: cursorPosition,
+            context: "remainder of sentence"
+        )
+        
+        highlightRangeBriefly(rest.range) {
+            self.deleteRange(rest.range, trackAsChange: false)
+            self.mode = .insert(.sentence)
+            self.insertContext = .sentence
+        }
+    }
+    
+    func executeAppendSentence() {
+        if let sentence = TextAnalyzer.getSentenceAt(position: cursorPosition, in: document.currentContent) {
+            cursorPosition = sentence.range.location + sentence.range.length
+        }
+        
+        pendingChangeTracker.startChange(
+            type: .added,
+            unitType: .sentence,
+            beforeText: nil,
+            position: cursorPosition,
+            context: "appended sentence"
+        )
+        
+        mode = .insert(.sentence)
+        insertContext = .sentence
     }
     
     // MARK: - Undo
@@ -557,10 +745,8 @@ struct ModalEditor: View {
         currentDiffIndex = 0
         mode = .comp
         
-        // BUGFIX #4: Navigate to first change if any
         if let firstChangeIndex = DiffGenerator.getChangeIndices(in: diffChanges).first {
             currentDiffIndex = firstChangeIndex
-            // Move cursor to the first change
             if currentDiffIndex < diffChanges.count {
                 cursorPosition = diffChanges[currentDiffIndex].range.location
             }
@@ -572,10 +758,8 @@ struct ModalEditor: View {
         
         switch char {
         case "n":
-            // Next change
             if let next = DiffGenerator.findNextChange(from: currentDiffIndex, in: diffChanges) {
                 currentDiffIndex = next
-                // Move cursor to the change (use displayRange for deletions)
                 if currentDiffIndex < diffChanges.count {
                     let change = diffChanges[currentDiffIndex]
                     if change.type == .deletion, let displayRange = change.displayRange {
@@ -587,10 +771,8 @@ struct ModalEditor: View {
             }
             
         case "p":
-            // Previous change
             if let prev = DiffGenerator.findPreviousChange(from: currentDiffIndex, in: diffChanges) {
                 currentDiffIndex = prev
-                // Move cursor to the change (use displayRange for deletions)
                 if currentDiffIndex < diffChanges.count {
                     let change = diffChanges[currentDiffIndex]
                     if change.type == .deletion, let displayRange = change.displayRange {
@@ -603,7 +785,7 @@ struct ModalEditor: View {
             
         case "\u{1B}": // ESC
             mode = .edit
-            diffChanges = []  // Clear diff data (and highlights via updateNSView)
+            diffChanges = []
             
         default:
             break
@@ -625,7 +807,6 @@ struct ModalEditor: View {
             return
         }
         
-        // Add character to command string
         mode = .command(current + String(char))
     }
 
@@ -633,28 +814,42 @@ struct ModalEditor: View {
         switch cmd {
         case "comp":
             enterCompMode()
-            
         case "print":
             if document.latestDraft != nil {
                 showingPrintSheet = true
             }
             mode = .edit
-            
         default:
             mode = .edit
         }
     }
     
     // MARK: - Helpers
-    
-    private func highlightRangeBriefly(_ range: NSRange, completion: @escaping () -> Void) {
-        highlightRange = range
         
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            highlightRange = nil
-            completion()
+        private func highlightRangeBriefly(_ range: NSRange, completion: @escaping () -> Void) {
+            // This is for RED deletion/action previews
+            highlightRange = range
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                highlightRange = nil
+                completion()
+            }
         }
-    }
+        
+        private func flashCursor() {
+            guard !document.currentContent.isEmpty else { return }
+            
+            var location = cursorPosition
+            if location >= document.currentContent.count {
+                location = max(0, document.currentContent.count - 1)
+            }
+            
+            // Use flashRange (Yellow) instead of highlightRange (Red)
+            flashRange = NSRange(location: location, length: 1)
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                flashRange = nil
+            }
+        }
 }
 
 // MARK: - Supporting Types
@@ -684,8 +879,8 @@ struct StatusBar: View {
     let stats: TextStats
     let draftInfo: String
     let hasUnsavedChanges: Bool
-    let branchInfo: String?  // BUGFIX #3: Show branch info
-    let diffInfo: DiffInfo?  // Show current change info in comp mode
+    let branchInfo: String?
+    let diffInfo: DiffInfo?
     
     struct DiffInfo {
         let currentIndex: Int
@@ -746,7 +941,7 @@ struct StatusBar: View {
                         .foregroundColor(.secondary)
                 }
             } else {
-                // Draft info (when not in comp mode)
+                // Draft info
                 Text(draftInfo)
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundColor(hasUnsavedChanges ? .orange : .secondary)
@@ -757,7 +952,6 @@ struct StatusBar: View {
                         .foregroundColor(.orange)
                 }
                 
-                // BUGFIX #3: Branch indicator
                 if let branch = branchInfo {
                     Text(branch)
                         .font(.system(size: 11, design: .monospaced))
@@ -818,7 +1012,7 @@ struct FirstDraftSheet: View {
                     dismiss()
                     onCancel()
                 }
-                .keyboardShortcut(.escape) // FIX: Add escape shortcut
+                .keyboardShortcut(.escape)
                 
                 Button("Save") {
                     if !draftName.isEmpty {
@@ -826,7 +1020,7 @@ struct FirstDraftSheet: View {
                         onSave(draftName)
                     }
                 }
-                .keyboardShortcut(.return) // FIX: Add return shortcut
+                .keyboardShortcut(.return)
                 .disabled(draftName.isEmpty)
             }
         }
@@ -861,7 +1055,6 @@ struct PrintDraftSheet: View {
                 .textFieldStyle(.roundedBorder)
                 .focused($focusedField, equals: .name)
                 .onSubmit {
-                    // Move to comment field on Enter
                     focusedField = .comment
                 }
             
@@ -869,7 +1062,6 @@ struct PrintDraftSheet: View {
                 .textFieldStyle(.roundedBorder)
                 .focused($focusedField, equals: .comment)
                 .onSubmit {
-                    // Save on Enter if both fields filled
                     if !draftName.isEmpty && !comment.isEmpty {
                         dismiss()
                         onSave(draftName, comment)
@@ -894,7 +1086,6 @@ struct PrintDraftSheet: View {
         .padding(24)
         .frame(width: 450)
         .onAppear {
-            // Focus the name field on appear
             focusedField = .name
         }
     }

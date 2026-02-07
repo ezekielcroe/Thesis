@@ -9,12 +9,15 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
     @Published var workingDraft: WorkingDraft?
     @Published var lastModified: Date
     
-    // BUGFIX #3: Track the active branch parent for correct genealogy
-    // When user restores a draft and saves, the new draft should parent to the restored draft
+    // Branch tracking for version control
     @Published var activeBranchParentId: UUID?
     
+    // ENHANCED: Track semantic changes in current editing session
+    @Published var sessionChanges: [SemanticChange]
+    
     enum CodingKeys: String, CodingKey {
-        case id, title, currentContent, drafts, workingDraft, lastModified, activeBranchParentId
+        case id, title, currentContent, drafts, workingDraft, lastModified
+        case activeBranchParentId, sessionChanges
     }
     
     init(title: String = "Untitled Thought") {
@@ -25,6 +28,7 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         self.workingDraft = nil
         self.lastModified = Date()
         self.activeBranchParentId = nil
+        self.sessionChanges = []
     }
     
     required init(from decoder: Decoder) throws {
@@ -36,6 +40,7 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         workingDraft = try container.decodeIfPresent(WorkingDraft.self, forKey: .workingDraft)
         lastModified = try container.decode(Date.self, forKey: .lastModified)
         activeBranchParentId = try container.decodeIfPresent(UUID.self, forKey: .activeBranchParentId)
+        sessionChanges = try container.decodeIfPresent([SemanticChange].self, forKey: .sessionChanges) ?? []
     }
     
     func encode(to encoder: Encoder) throws {
@@ -47,78 +52,84 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         try container.encode(workingDraft, forKey: .workingDraft)
         try container.encode(lastModified, forKey: .lastModified)
         try container.encode(activeBranchParentId, forKey: .activeBranchParentId)
+        try container.encode(sessionChanges, forKey: .sessionChanges)
     }
     
-    // MARK: - Equatable Conformance
     static func == (lhs: Document, rhs: Document) -> Bool {
         lhs.id == rhs.id
     }
+    
+    // MARK: - Draft Management with Semantic Changes
     
     func saveFirstDraft(name: String) {
         let draft = Draft(
             name: name,
             content: currentContent,
             comment: "Initial capture",
-            isFirstDraft: true
+            isFirstDraft: true,
+            changes: []  // No changes for first draft
         )
         drafts.append(draft)
         workingDraft = nil
+        sessionChanges = []  // Clear session changes
         lastModified = Date()
-        // Set the active branch to this new draft
         activeBranchParentId = draft.id
     }
     
     func saveDraft(name: String, comment: String) {
-        // BUGFIX #3: Use activeBranchParentId for correct genealogy
-        // This ensures that if user restored Draft #2 and saves, the new draft
-        // correctly parents to Draft #2, not just drafts.last
         let parentId = activeBranchParentId ?? drafts.last?.id
         
+        // Use accumulated session changes
         let draft = Draft(
             name: name,
             content: currentContent,
             comment: comment,
-            parentId: parentId
+            parentId: parentId,
+            changes: sessionChanges
         )
+        
         drafts.append(draft)
         workingDraft = nil
+        sessionChanges = []  // Clear for next session
         lastModified = Date()
-        
-        // Update active branch to point to the new draft
         activeBranchParentId = draft.id
     }
     
-    // BUGFIX #3: Non-destructive draft restoration with auto-snapshot
     func restoreDraft(_ draft: Draft) {
-        // Safety Check: Is the current state dirty (has unsaved changes)?
+        // Safety Check: Is the current state dirty?
         if hasUnsavedChanges {
-            // Create an automatic snapshot before overwriting
             let snapshot = Draft(
                 name: "Auto-Snapshot",
                 content: currentContent,
                 comment: "Snapshot taken before restoring '\(draft.name)'",
-                parentId: latestDraft?.id
+                parentId: latestDraft?.id,
+                changes: sessionChanges
             )
             drafts.append(snapshot)
         }
         
-        // Restore the content
         currentContent = draft.content
-        
-        // BUGFIX #3: Update the branch pointer to the restored draft
-        // Next save will correctly parent to this draft, not the chronological last
         activeBranchParentId = draft.id
-        
-        // Update working draft
+        sessionChanges = []  // Clear changes when restoring
         updateWorkingDraft()
     }
     
-    // FIX: Use async update to avoid "Publishing changes from within view updates" warning
-    func updateWorkingDraft() {
-        // Schedule the update for the next run loop to avoid SwiftUI state conflicts
+    // ENHANCED: Add a semantic change to the session
+    func recordChange(_ change: SemanticChange) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.workingDraft = WorkingDraft(content: self.currentContent)
+            self.sessionChanges.append(change)
+            self.updateWorkingDraft()
+        }
+    }
+    
+    func updateWorkingDraft() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.workingDraft = WorkingDraft(
+                content: self.currentContent,
+                pendingChanges: self.sessionChanges
+            )
             self.lastModified = Date()
         }
     }
@@ -127,27 +138,34 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         guard let lastDraft = drafts.last else {
             return !currentContent.isEmpty
         }
-        return currentContent != lastDraft.content
+        return currentContent != lastDraft.content || !sessionChanges.isEmpty
     }
     
     var latestDraft: Draft? {
         return drafts.last
     }
     
-    // MARK: - Branch Information (for UI display)
+    // MARK: - Branch Information
     
-    /// Returns the draft that the current working content is branching from
     var currentBranchParent: Draft? {
         guard let parentId = activeBranchParentId else { return nil }
         return drafts.first { $0.id == parentId }
     }
     
-    /// Returns true if the current content is branching from a non-latest draft
     var isBranching: Bool {
         guard let parentId = activeBranchParentId,
               let latestId = latestDraft?.id else {
             return false
         }
         return parentId != latestId
+    }
+    
+    // MARK: - Session Change Summary
+    
+    var sessionChangeSummary: String {
+        guard !sessionChanges.isEmpty else {
+            return "No changes in session"
+        }
+        return ChangeSummary(changes: sessionChanges).text
     }
 }

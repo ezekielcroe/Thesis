@@ -9,7 +9,17 @@ struct Draft: Identifiable, Codable, Equatable {
     let parentId: UUID?
     let isFirstDraft: Bool
     
-    init(name: String, content: String, comment: String = "", parentId: UUID? = nil, isFirstDraft: Bool = false) {
+    // ENHANCED: Semantic change tracking
+    let changes: [SemanticChange]
+    
+    init(
+        name: String,
+        content: String,
+        comment: String = "",
+        parentId: UUID? = nil,
+        isFirstDraft: Bool = false,
+        changes: [SemanticChange] = []
+    ) {
         self.id = UUID()
         self.name = name
         self.content = content
@@ -17,6 +27,7 @@ struct Draft: Identifiable, Codable, Equatable {
         self.comment = comment
         self.parentId = parentId
         self.isFirstDraft = isFirstDraft
+        self.changes = changes
     }
     
     var displayTimestamp: String {
@@ -32,15 +43,36 @@ struct Draft: Identifiable, Codable, Equatable {
         }
         return name
     }
+    
+    // ENHANCED: Change summary
+    var changeSummary: String {
+        guard !changes.isEmpty else {
+            return isFirstDraft ? "Initial capture" : "No changes"
+        }
+        
+        return ChangeSummary(changes: changes).text
+    }
+    
+    // Breakdown of changes by type
+    var changeBreakdown: [(type: SemanticChangeType, count: Int)] {
+        return ChangeSummary(changes: changes).breakdown
+    }
+    
+    // Total number of semantic changes
+    var changeCount: Int {
+        return changes.count
+    }
 }
 
 // Working draft that auto-saves but isn't committed
 struct WorkingDraft: Codable {
     var content: String
     var lastSaved: Date
+    var pendingChanges: [SemanticChange]  // ENHANCED: Track changes in progress
     
-    init(content: String) {
+    init(content: String, pendingChanges: [SemanticChange] = []) {
         self.content = content
         self.lastSaved = Date()
+        self.pendingChanges = pendingChanges
     }
 }

@@ -63,15 +63,38 @@ struct EditorTextView: NSViewRepresentable {
     @Binding var mode: EditorMode
     @Binding var cursorPosition: Int
     @Binding var highlightRange: NSRange?
+    @Binding var diffChanges: [DiffChange]  // NEW: For diff visualization
     
     let onTextChange: () -> Void
     let onKeyPress: (String, NSEvent.ModifierFlags) -> Void
+    let onModeChange: (EditorMode) -> Void  // NEW: Callback for mode changes from delegate
     
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSTextView.scrollableTextView()
+        // Create scroll view manually to ensure we use our CustomTextView
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
         
-        let customTextView = CustomTextView()
-        scrollView.documentView = customTextView
+        // Create our custom text view with TextKit 1 for reliable cursor control
+        // TextKit 2 (default in macOS 13+) ignores shouldDrawInsertionPoint override
+        let contentSize = scrollView.contentSize
+        let textContainer = NSTextContainer(containerSize: NSSize(width: contentSize.width, height: CGFloat.greatestFiniteMagnitude))
+        textContainer.widthTracksTextView = true
+        
+        let layoutManager = NSLayoutManager()
+        layoutManager.addTextContainer(textContainer)
+        
+        let textStorage = NSTextStorage()
+        textStorage.addLayoutManager(layoutManager)
+        
+        let customTextView = CustomTextView(frame: NSRect(origin: .zero, size: contentSize), textContainer: textContainer)
+        customTextView.minSize = NSSize(width: 0, height: contentSize.height)
+        customTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        customTextView.isVerticallyResizable = true
+        customTextView.isHorizontallyResizable = false
+        customTextView.autoresizingMask = [.width]
         
         customTextView.delegate = context.coordinator
         customTextView.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
@@ -86,7 +109,16 @@ struct EditorTextView: NSViewRepresentable {
         customTextView.insertionPointColor = NSColor.controlAccentColor
         customTextView.isSelectable = true
         
+        // ALWAYS keep editable = true
+        // We simulate "read-only" via delegate interception (see shouldChangeTextIn)
+        customTextView.isEditable = true
+        
+        // Set the text view as the document view
+        scrollView.documentView = customTextView
+        
+        // Set coordinator reference for direct communication
         context.coordinator.textView = customTextView
+        customTextView.coordinator = context.coordinator
         
         return scrollView
     }
@@ -106,19 +138,14 @@ struct EditorTextView: NSViewRepresentable {
             textView.scrollRangeToVisible(range)
         }
         
-        // Sync highlights
+        // Sync highlights (for delete/change previews)
         if let range = highlightRange {
             textView.showFindIndicator(for: range)
         }
         
-        // Logic: Enable editing for Typing modes (Insert/FreeText), disable for Command modes
-        switch mode {
-        case .insert, .freeText:
-            textView.isEditable = true
-        default:
-            textView.isEditable = false
-        }
-        
+        // BUGFIX #1: ALWAYS keep isEditable = true
+        // The "read-only" behavior is enforced via shouldChangeTextIn delegate method
+        textView.isEditable = true
         textView.isSelectable = true
         textView.currentMode = mode
         
@@ -127,14 +154,78 @@ struct EditorTextView: NSViewRepresentable {
             textView.window?.makeFirstResponder(textView)
         }
         
-        // Visual feedback
+        // BUGFIX #4: Render diff visualization in comp mode
         if mode == .comp {
-            textView.textColor = NSColor.secondaryLabelColor
+            textView.textColor = NSColor.labelColor // Keep text visible
+            renderDiffHighlights(textView: textView)
         } else {
+            // Clear any diff highlights when not in comp mode
+            clearDiffHighlights(textView: textView)
             textView.textColor = NSColor.labelColor
         }
         
         context.coordinator.parent = self
+        textView.coordinator = context.coordinator
+    }
+    
+    // MARK: - BUGFIX #4: Diff Rendering
+    
+    private func renderDiffHighlights(textView: CustomTextView) {
+        guard let layoutManager = textView.layoutManager else { return }
+        
+        let textLength = (textView.string as NSString).length
+        let fullRange = NSRange(location: 0, length: textLength)
+        
+        // Clear existing temporary attributes
+        layoutManager.removeTemporaryAttribute(.backgroundColor, forCharacterRange: fullRange)
+        layoutManager.removeTemporaryAttribute(.underlineStyle, forCharacterRange: fullRange)
+        layoutManager.removeTemporaryAttribute(.underlineColor, forCharacterRange: fullRange)
+        
+        // Apply highlights for diff changes
+        for change in diffChanges {
+            switch change.type {
+            case .addition:
+                // Validate range is within bounds
+                guard change.range.location + change.range.length <= textLength else {
+                    continue
+                }
+                // Green background for added text
+                layoutManager.addTemporaryAttribute(
+                    .backgroundColor,
+                    value: NSColor.systemGreen.withAlphaComponent(0.3),
+                    forCharacterRange: change.range
+                )
+                
+            case .deletion:
+                // Show a red underline at the position where text was deleted
+                // Use displayRange which indicates where in the new text to show the marker
+                if let displayRange = change.displayRange {
+                    // Mark a small range (or the character before) with red to indicate deletion occurred here
+                    let markerStart = min(displayRange.location, textLength > 0 ? textLength - 1 : 0)
+                    let markerLength = min(1, textLength - markerStart)
+                    if markerLength > 0 {
+                        let markerRange = NSRange(location: markerStart, length: markerLength)
+                        layoutManager.addTemporaryAttribute(
+                            .backgroundColor,
+                            value: NSColor.systemRed.withAlphaComponent(0.2),
+                            forCharacterRange: markerRange
+                        )
+                    }
+                }
+                
+            case .unchanged:
+                // No highlighting for unchanged text
+                break
+            }
+        }
+    }
+    
+    private func clearDiffHighlights(textView: CustomTextView) {
+        guard let layoutManager = textView.layoutManager else { return }
+        let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+        layoutManager.removeTemporaryAttribute(.backgroundColor, forCharacterRange: fullRange)
+        layoutManager.removeTemporaryAttribute(.underlineStyle, forCharacterRange: fullRange)
+        layoutManager.removeTemporaryAttribute(.underlineColor, forCharacterRange: fullRange)
     }
     
     func makeCoordinator() -> Coordinator {
@@ -144,6 +235,9 @@ struct EditorTextView: NSViewRepresentable {
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: EditorTextView
         weak var textView: CustomTextView?
+        
+        // Track last newline position for paragraph mode
+        private var lastNewlinePosition: Int = -1
         
         init(_ parent: EditorTextView) {
             self.parent = parent
@@ -158,6 +252,81 @@ struct EditorTextView: NSViewRepresentable {
             parent.onTextChange()
         }
         
+        // MARK: - BUGFIX #2: Synchronous Input Filtering
+        // This is the KEY fix for constrained insert mode triggers.
+        // By intercepting here, we BLOCK characters BEFORE they enter the text storage.
+        
+        func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
+            
+            // Handle based on current mode
+            switch parent.mode {
+            case .freeText:
+                // Allow all typing in free text mode
+                return true
+                
+            case .insert(let context):
+                guard let input = replacementString else { return true }
+                
+                // Always allow backspace/deletion
+                if input.isEmpty {
+                    return true
+                }
+                
+                // BUGFIX #2: Check exit triggers BEFORE allowing the character
+                switch context {
+                case .word:
+                    // Exit on space or newline - ALLOW the space, then exit
+                    if input == " " || input == "\n" {
+                        // Switch mode asynchronously to avoid state modification during view update
+                        DispatchQueue.main.async {
+                            self.parent.onModeChange(.edit)
+                        }
+                        return true  // Allow the space/newline to be typed, then exit
+                    }
+                    
+                case .sentence:
+                    // Exit AFTER punctuation - ALLOW the character, then exit
+                    if input == "." || input == "!" || input == "?" {
+                        DispatchQueue.main.async {
+                            self.parent.onModeChange(.edit)
+                        }
+                        return true  // Allow the punctuation to be typed
+                    }
+                    
+                case .paragraph:
+                    // Exit on double newline
+                    if input == "\n" {
+                        let currentPos = parent.cursorPosition
+                        let textLength = (parent.text as NSString).length
+                        
+                        // Check if the character before cursor is also a newline
+                        let hasNewlineBefore = currentPos > 0 && textLength > 0 &&
+                            (parent.text as NSString).substring(with: NSRange(location: currentPos - 1, length: 1)) == "\n"
+                        
+                        if hasNewlineBefore {
+                            DispatchQueue.main.async {
+                                self.parent.onModeChange(.edit)
+                            }
+                            lastNewlinePosition = -1
+                            return false  // Block the second newline
+                        } else {
+                            lastNewlinePosition = currentPos
+                            return true  // Allow first newline
+                        }
+                    } else {
+                        lastNewlinePosition = -1
+                    }
+                }
+                
+                return true  // Allow all other characters in insert mode
+                
+            case .edit, .comp, .command:
+                // BUGFIX #1: Block ALL text changes in non-typing modes
+                // This makes the view "virtually read-only" while keeping cursor visible
+                return false
+            }
+        }
+        
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             // 1. Always Handle ESC in parent
             if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
@@ -165,7 +334,7 @@ struct EditorTextView: NSViewRepresentable {
                 return true
             }
             
-            // 2. Always Allow Arrow Keys
+            // 2. Always Allow Arrow Keys (for navigation in all modes)
             if commandSelector == #selector(NSResponder.moveUp(_:)) ||
                commandSelector == #selector(NSResponder.moveDown(_:)) ||
                commandSelector == #selector(NSResponder.moveLeft(_:)) ||
@@ -183,46 +352,53 @@ struct EditorTextView: NSViewRepresentable {
                 return true
             }
         }
-        
-        func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
-            // Allow typing only in Insert or FreeText modes
-            switch parent.mode {
-            case .insert, .freeText:
-                return true
-            default:
-                return false
-            }
-        }
     }
 }
 
 // MARK: - Custom NSTextView
 
 class CustomTextView: NSTextView {
-    // Default to .insert(.word) to satisfy initialization requirements
-    var currentMode: EditorMode = .insert(.word)
+    // Track current mode - kept for backwards compatibility but coordinator.parent.mode is source of truth
+    var currentMode: EditorMode = .freeText
+    
+    // Reference to coordinator for direct communication and real-time mode access
+    weak var coordinator: EditorTextView.Coordinator?
+    
+    // Get the actual current mode from the coordinator's parent binding (real-time)
+    private var actualMode: EditorMode {
+        return coordinator?.parent.mode ?? currentMode
+    }
     
     override var acceptsFirstResponder: Bool {
         return true
     }
     
     override func keyDown(with event: NSEvent) {
-        switch currentMode {
-        case .insert, .freeText:
-            // Standard typing behavior
-            super.keyDown(with: event)
-            
+        let mode = actualMode  // Use binding-backed mode for real-time accuracy
+        
+        // Handle ESC specially - always send to parent
+        if event.keyCode == 53 { // ESC key
+            coordinator?.parent.onKeyPress("\u{1B}", event.modifierFlags)
+            return
+        }
+        
+        // For edit/comp/command modes, intercept ALL keys and send to parent handler
+        switch mode {
         case .edit, .comp, .command:
-            // Intercept keys and send to parent handler
             if let characters = event.characters {
-                if let coordinator = delegate as? EditorTextView.Coordinator {
-                    coordinator.parent.onKeyPress(characters, event.modifierFlags)
-                }
+                coordinator?.parent.onKeyPress(characters, event.modifierFlags)
             }
             // Do NOT call super (suppress system beep/input)
+            return
+            
+        case .insert, .freeText:
+            // For insert/freeText modes, let NSTextView handle normally
+            // The shouldChangeTextIn delegate will filter based on context
+            super.keyDown(with: event)
         }
     }
     
+    // Always draw insertion point (for Bug #1 fix)
     override var shouldDrawInsertionPoint: Bool {
         return true
     }
@@ -695,8 +871,10 @@ struct ModalEditor: View {
                     mode: $mode,
                     cursorPosition: $cursorPosition,
                     highlightRange: $highlightRange,
+                    diffChanges: $diffChanges,  // BUGFIX #4: Pass diff changes for rendering
                     onTextChange: { handleTextChange() },
-                    onKeyPress: { key, modifiers in handleKeyPress(key, modifiers: modifiers) }
+                    onKeyPress: { key, modifiers in handleKeyPress(key, modifiers: modifiers) },
+                    onModeChange: { newMode in handleModeChange(newMode) }  // BUGFIX #2: Handle mode changes from delegate
                 )
                 .border(mode.borderColor, width: 3)
             }
@@ -707,7 +885,9 @@ struct ModalEditor: View {
                 commandBuffer: commandBuffer,
                 stats: stats,
                 draftInfo: draftInfo,
-                hasUnsavedChanges: document.hasUnsavedChanges
+                hasUnsavedChanges: document.hasUnsavedChanges,
+                branchInfo: branchInfo,
+                diffInfo: currentDiffInfo
             )
         }
         .onAppear {
@@ -751,6 +931,31 @@ struct ModalEditor: View {
         return "No draft saved"
     }
     
+    // BUGFIX #3: Display branch information
+    private var branchInfo: String? {
+        if document.isBranching, let parent = document.currentBranchParent {
+            return "Branching from: \(parent.name)"
+        }
+        return nil
+    }
+    
+    // Diff info for comp mode status bar
+    private var currentDiffInfo: StatusBar.DiffInfo? {
+        guard mode == .comp, !diffChanges.isEmpty else { return nil }
+        
+        let changeIndices = DiffGenerator.getChangeIndices(in: diffChanges)
+        guard !changeIndices.isEmpty else { return nil }
+        
+        // Find which change index we're at
+        let currentChangeArrayIndex = changeIndices.firstIndex(of: currentDiffIndex) ?? 0
+        
+        return StatusBar.DiffInfo(
+            currentIndex: currentChangeArrayIndex,
+            totalChanges: changeIndices.count,
+            currentChange: currentDiffIndex < diffChanges.count ? diffChanges[currentDiffIndex] : nil
+        )
+    }
+    
     private func updateStats() {
         // Calculate stats using TextAnalyzer
         let paragraphs = TextAnalyzer.getParagraphs(in: document.currentContent)
@@ -771,18 +976,27 @@ struct ModalEditor: View {
     }
 
     private func handleTextChange() {
-            DispatchQueue.main.async {
-                self.updateStats()
-            }
-            
-            // Use a switch to match .edit OR any case of .insert
-            switch mode {
-            case .insert, .edit:
-                document.updateWorkingDraft()
-            default:
-                break
-            }
+        DispatchQueue.main.async {
+            self.updateStats()
         }
+        
+        // Use a switch to match .edit OR any case of .insert
+        switch mode {
+        case .insert, .edit:
+            document.updateWorkingDraft()
+        default:
+            break
+        }
+    }
+    
+    // BUGFIX #2: Handle mode changes triggered by the delegate
+    private func handleModeChange(_ newMode: EditorMode) {
+        mode = newMode
+        if newMode == .edit {
+            insertContext = nil
+            lastNewlinePosition = -1
+        }
+    }
     
     private func handleKeyPress(_ characters: String, modifiers: NSEvent.ModifierFlags) {
         // Handle Cmd+D for comp mode (only in EDIT mode)
@@ -825,7 +1039,9 @@ struct ModalEditor: View {
         // All other keys pass through naturally
     }
     
-    // MARK: - Insert Mode (COMPLETE FIX)
+    // MARK: - Insert Mode
+    // Note: Exit trigger logic is now handled in EditorTextView.Coordinator.shouldChangeTextIn
+    // This handler is now simplified since the delegate handles exit conditions
 
     private func handleInsertMode(_ characters: String, context: InsertContext) {
         // ESC always exits to EDIT
@@ -835,45 +1051,8 @@ struct ModalEditor: View {
             return
         }
         
-        // Check exit conditions based on context
-        switch context {
-        case .word:
-            // Exit on space or newline (block the character)
-            if characters == " " || characters == "\n" {
-                mode = .edit
-                insertContext = nil
-                // Don't type the space/newline
-                return
-            }
-            
-        case .sentence:
-            // Exit on . ! ? (allow the character first)
-            if characters == "." || characters == "!" || characters == "?" {
-                // Let the character be typed, then exit
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    self.mode = .edit
-                    self.insertContext = nil
-                }
-            }
-            
-        case .paragraph:
-            // Exit on double newline
-            if characters == "\n" {
-                if lastNewlinePosition == cursorPosition - 1 {
-                    // Second newline in a row - exit
-                    mode = .edit
-                    insertContext = nil
-                    lastNewlinePosition = -1
-                    return
-                } else {
-                    lastNewlinePosition = cursorPosition
-                }
-            } else {
-                lastNewlinePosition = -1
-            }
-        }
-        
-        // All other keys pass through to editor
+        // All other character handling is done by the delegate's shouldChangeTextIn
+        // The delegate blocks/allows characters and triggers mode changes as needed
     }
 
     // MARK: - Edit Mode
@@ -1033,8 +1212,13 @@ struct ModalEditor: View {
     private func moveToNextWord() {
         let words = TextAnalyzer.getWords(in: document.currentContent)
         
-        // Find the first word that starts AFTER the current cursor position
-        if let nextWord = words.first(where: { $0.range.location > cursorPosition }) {
+        // Find the current word (if cursor is inside one)
+        let currentWordEnd = words.first(where: {
+            NSLocationInRange(cursorPosition, $0.range)
+        }).map { $0.range.location + $0.range.length } ?? cursorPosition
+        
+        // Find the first word that starts AT OR AFTER the end of current word
+        if let nextWord = words.first(where: { $0.range.location >= currentWordEnd }) {
             cursorPosition = nextWord.range.location
         }
     }
@@ -1043,6 +1227,7 @@ struct ModalEditor: View {
         let words = TextAnalyzer.getWords(in: document.currentContent)
         
         // Find the last word that starts BEFORE the current cursor position
+        // If we're at the start of a word, go to the previous word
         if let prevWord = words.last(where: { $0.range.location < cursorPosition }) {
             cursorPosition = prevWord.range.location
         }
@@ -1209,6 +1394,15 @@ struct ModalEditor: View {
         )
         currentDiffIndex = 0
         mode = .comp
+        
+        // BUGFIX #4: Navigate to first change if any
+        if let firstChangeIndex = DiffGenerator.getChangeIndices(in: diffChanges).first {
+            currentDiffIndex = firstChangeIndex
+            // Move cursor to the first change
+            if currentDiffIndex < diffChanges.count {
+                cursorPosition = diffChanges[currentDiffIndex].range.location
+            }
+        }
     }
     
     private func handleCompMode(_ characters: String) {
@@ -1219,17 +1413,35 @@ struct ModalEditor: View {
             // Next change
             if let next = DiffGenerator.findNextChange(from: currentDiffIndex, in: diffChanges) {
                 currentDiffIndex = next
+                // Move cursor to the change (use displayRange for deletions)
+                if currentDiffIndex < diffChanges.count {
+                    let change = diffChanges[currentDiffIndex]
+                    if change.type == .deletion, let displayRange = change.displayRange {
+                        cursorPosition = displayRange.location
+                    } else {
+                        cursorPosition = change.range.location
+                    }
+                }
             }
             
         case "p":
             // Previous change
             if let prev = DiffGenerator.findPreviousChange(from: currentDiffIndex, in: diffChanges) {
                 currentDiffIndex = prev
+                // Move cursor to the change (use displayRange for deletions)
+                if currentDiffIndex < diffChanges.count {
+                    let change = diffChanges[currentDiffIndex]
+                    if change.type == .deletion, let displayRange = change.displayRange {
+                        cursorPosition = displayRange.location
+                    } else {
+                        cursorPosition = change.range.location
+                    }
+                }
             }
             
         case "\u{1B}": // ESC
             mode = .edit
-            diffChanges = []
+            diffChanges = []  // Clear diff data (and highlights via updateNSView)
             
         default:
             break
@@ -1310,6 +1522,14 @@ struct StatusBar: View {
     let stats: TextStats
     let draftInfo: String
     let hasUnsavedChanges: Bool
+    let branchInfo: String?  // BUGFIX #3: Show branch info
+    let diffInfo: DiffInfo?  // Show current change info in comp mode
+    
+    struct DiffInfo {
+        let currentIndex: Int
+        let totalChanges: Int
+        let currentChange: DiffChange?
+    }
     
     var body: some View {
         HStack(spacing: 16) {
@@ -1329,15 +1549,62 @@ struct StatusBar: View {
                     .foregroundColor(.secondary)
             }
             
-            // Draft info
-            Text(draftInfo)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(hasUnsavedChanges ? .orange : .secondary)
-            
-            if hasUnsavedChanges {
-                Text("*")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundColor(.orange)
+            // Diff info (in comp mode)
+            if let diff = diffInfo {
+                HStack(spacing: 8) {
+                    Text("Change \(diff.currentIndex + 1)/\(diff.totalChanges)")
+                        .font(.system(size: 11, design: .monospaced))
+                    
+                    if let change = diff.currentChange {
+                        switch change.type {
+                        case .addition:
+                            Text("ADDED")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.green)
+                                .cornerRadius(3)
+                        case .deletion:
+                            Text("DELETED: \"\(change.text.prefix(30))\(change.text.count > 30 ? "..." : "")\"")
+                                .font(.system(size: 10))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.red)
+                                .cornerRadius(3)
+                                .lineLimit(1)
+                        case .unchanged:
+                            EmptyView()
+                        }
+                    }
+                    
+                    Text("(n: next, p: prev, ESC: exit)")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                // Draft info (when not in comp mode)
+                Text(draftInfo)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(hasUnsavedChanges ? .orange : .secondary)
+                
+                if hasUnsavedChanges {
+                    Text("*")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.orange)
+                }
+                
+                // BUGFIX #3: Branch indicator
+                if let branch = branchInfo {
+                    Text(branch)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.purple)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(Color.purple.opacity(0.15))
+                        .cornerRadius(4)
+                }
             }
             
             Spacer()
@@ -1409,8 +1676,14 @@ struct FirstDraftSheet: View {
 struct PrintDraftSheet: View {
     @State private var draftName: String = ""
     @State private var comment: String = ""
+    @FocusState private var focusedField: Field?
     let onSave: (String, String) -> Void
     @Environment(\.dismiss) var dismiss
+    
+    enum Field {
+        case name
+        case comment
+    }
     
     var body: some View {
         VStack(spacing: 20) {
@@ -1424,9 +1697,22 @@ struct PrintDraftSheet: View {
             
             TextField("Draft name", text: $draftName)
                 .textFieldStyle(.roundedBorder)
+                .focused($focusedField, equals: .name)
+                .onSubmit {
+                    // Move to comment field on Enter
+                    focusedField = .comment
+                }
             
             TextField("What changed in your thinking?", text: $comment)
                 .textFieldStyle(.roundedBorder)
+                .focused($focusedField, equals: .comment)
+                .onSubmit {
+                    // Save on Enter if both fields filled
+                    if !draftName.isEmpty && !comment.isEmpty {
+                        dismiss()
+                        onSave(draftName, comment)
+                    }
+                }
             
             HStack(spacing: 12) {
                 Button("Cancel") {
@@ -1440,15 +1726,17 @@ struct PrintDraftSheet: View {
                         onSave(draftName, comment)
                     }
                 }
-                .keyboardShortcut(.return)
                 .disabled(draftName.isEmpty || comment.isEmpty)
             }
         }
         .padding(24)
         .frame(width: 450)
+        .onAppear {
+            // Focus the name field on appear
+            focusedField = .name
+        }
     }
 }
-
 
 
 ==================================================
@@ -1466,8 +1754,12 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
     @Published var workingDraft: WorkingDraft?
     @Published var lastModified: Date
     
+    // BUGFIX #3: Track the active branch parent for correct genealogy
+    // When user restores a draft and saves, the new draft should parent to the restored draft
+    @Published var activeBranchParentId: UUID?
+    
     enum CodingKeys: String, CodingKey {
-        case id, title, currentContent, drafts, workingDraft, lastModified
+        case id, title, currentContent, drafts, workingDraft, lastModified, activeBranchParentId
     }
     
     init(title: String = "Untitled Thought") {
@@ -1477,6 +1769,7 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         self.drafts = []
         self.workingDraft = nil
         self.lastModified = Date()
+        self.activeBranchParentId = nil
     }
     
     required init(from decoder: Decoder) throws {
@@ -1487,6 +1780,7 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         drafts = try container.decode([Draft].self, forKey: .drafts)
         workingDraft = try container.decodeIfPresent(WorkingDraft.self, forKey: .workingDraft)
         lastModified = try container.decode(Date.self, forKey: .lastModified)
+        activeBranchParentId = try container.decodeIfPresent(UUID.self, forKey: .activeBranchParentId)
     }
     
     func encode(to encoder: Encoder) throws {
@@ -1497,6 +1791,7 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         try container.encode(drafts, forKey: .drafts)
         try container.encode(workingDraft, forKey: .workingDraft)
         try container.encode(lastModified, forKey: .lastModified)
+        try container.encode(activeBranchParentId, forKey: .activeBranchParentId)
     }
     
     // MARK: - Equatable Conformance
@@ -1514,18 +1809,53 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         drafts.append(draft)
         workingDraft = nil
         lastModified = Date()
+        // Set the active branch to this new draft
+        activeBranchParentId = draft.id
     }
     
     func saveDraft(name: String, comment: String) {
+        // BUGFIX #3: Use activeBranchParentId for correct genealogy
+        // This ensures that if user restored Draft #2 and saves, the new draft
+        // correctly parents to Draft #2, not just drafts.last
+        let parentId = activeBranchParentId ?? drafts.last?.id
+        
         let draft = Draft(
             name: name,
             content: currentContent,
             comment: comment,
-            parentId: drafts.last?.id
+            parentId: parentId
         )
         drafts.append(draft)
         workingDraft = nil
         lastModified = Date()
+        
+        // Update active branch to point to the new draft
+        activeBranchParentId = draft.id
+    }
+    
+    // BUGFIX #3: Non-destructive draft restoration with auto-snapshot
+    func restoreDraft(_ draft: Draft) {
+        // Safety Check: Is the current state dirty (has unsaved changes)?
+        if hasUnsavedChanges {
+            // Create an automatic snapshot before overwriting
+            let snapshot = Draft(
+                name: "Auto-Snapshot",
+                content: currentContent,
+                comment: "Snapshot taken before restoring '\(draft.name)'",
+                parentId: latestDraft?.id
+            )
+            drafts.append(snapshot)
+        }
+        
+        // Restore the content
+        currentContent = draft.content
+        
+        // BUGFIX #3: Update the branch pointer to the restored draft
+        // Next save will correctly parent to this draft, not the chronological last
+        activeBranchParentId = draft.id
+        
+        // Update working draft
+        updateWorkingDraft()
     }
     
     // FIX: Use async update to avoid "Publishing changes from within view updates" warning
@@ -1538,12 +1868,6 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         }
     }
     
-    func restoreDraft(_ draft: Draft) {
-        currentContent = draft.content
-        // FIX: Call updateWorkingDraft which now handles async properly
-        updateWorkingDraft()
-    }
-    
     var hasUnsavedChanges: Bool {
         guard let lastDraft = drafts.last else {
             return !currentContent.isEmpty
@@ -1553,6 +1877,23 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
     
     var latestDraft: Draft? {
         return drafts.last
+    }
+    
+    // MARK: - Branch Information (for UI display)
+    
+    /// Returns the draft that the current working content is branching from
+    var currentBranchParent: Draft? {
+        guard let parentId = activeBranchParentId else { return nil }
+        return drafts.first { $0.id == parentId }
+    }
+    
+    /// Returns true if the current content is branching from a non-latest draft
+    var isBranching: Bool {
+        guard let parentId = activeBranchParentId,
+              let latestId = latestDraft?.id else {
+            return false
+        }
+        return parentId != latestId
     }
 }
 
@@ -1845,47 +2186,57 @@ import Foundation
 struct DiffChange: Identifiable {
     let id = UUID()
     let type: ChangeType
-    let range: NSRange
+    let range: NSRange      // Range in the NEW text (for additions/unchanged) or OLD text (for deletions)
     let text: String
+    let displayRange: NSRange?  // Where to show indicator in current buffer (for deletions)
     
     enum ChangeType {
         case addition
         case deletion
         case unchanged
     }
+    
+    init(type: ChangeType, range: NSRange, text: String, displayRange: NSRange? = nil) {
+        self.type = type
+        self.range = range
+        self.text = text
+        self.displayRange = displayRange
+    }
 }
 
 class DiffGenerator {
     
+    /// Generate a diff that can be visualized in the current (new) text buffer
+    /// - Additions: highlighted in green at their position in new text
+    /// - Deletions: marked with red indicator at the position where they were removed
     static func generateDiff(from oldText: String, to newText: String) -> [DiffChange] {
         var changes: [DiffChange] = []
         
-        // Simple line-by-line diff for MVP
         let oldSentences = TextAnalyzer.getSentences(in: oldText)
         let newSentences = TextAnalyzer.getSentences(in: newText)
         
-        // Create a map of sentence text to track changes
+        // Create maps for quick lookup
         let oldSentenceSet = Set(oldSentences.map { $0.text })
         let newSentenceSet = Set(newSentences.map { $0.text })
         
+        // Track positions in new text
         var currentLocation = 0
         
-        // Process new sentences
+        // Process new sentences - mark additions and unchanged
         for newSentence in newSentences {
             let text = newSentence.text
+            let range = NSRange(location: currentLocation, length: text.count)
             
             if oldSentenceSet.contains(text) {
-                // Unchanged
                 changes.append(DiffChange(
                     type: .unchanged,
-                    range: NSRange(location: currentLocation, length: text.count),
+                    range: range,
                     text: text
                 ))
             } else {
-                // Addition
                 changes.append(DiffChange(
                     type: .addition,
-                    range: NSRange(location: currentLocation, length: text.count),
+                    range: range,
                     text: text
                 ))
             }
@@ -1893,19 +2244,40 @@ class DiffGenerator {
             currentLocation += text.count
         }
         
-        // Find deletions (in old but not in new)
-        for oldSentence in oldSentences {
+        // Find deletions and calculate where they should be indicated
+        // We'll show deletion markers at the position of the nearest remaining sentence
+        for (index, oldSentence) in oldSentences.enumerated() {
             if !newSentenceSet.contains(oldSentence.text) {
+                // Find where this deletion should be indicated in the new text
+                // Look for the next sentence that still exists
+                var displayLocation = 0
+                
+                // Find a nearby sentence that exists in both to anchor the deletion indicator
+                for i in (0..<index).reversed() {
+                    if newSentenceSet.contains(oldSentences[i].text) {
+                        // Find this sentence in new text
+                        if let match = newSentences.first(where: { $0.text == oldSentences[i].text }) {
+                            displayLocation = match.range.location + match.range.length
+                            break
+                        }
+                    }
+                }
+                
                 changes.append(DiffChange(
                     type: .deletion,
-                    range: oldSentence.range,
-                    text: oldSentence.text
+                    range: oldSentence.range,  // Original range in old text
+                    text: oldSentence.text,
+                    displayRange: NSRange(location: displayLocation, length: 0)  // Where to show in new text
                 ))
             }
         }
         
-        // Sort by location
-        changes.sort { $0.range.location < $1.range.location }
+        // Sort by display position (use range.location for additions, displayRange for deletions)
+        changes.sort { lhs, rhs in
+            let lhsLoc = lhs.type == .deletion ? (lhs.displayRange?.location ?? 0) : lhs.range.location
+            let rhsLoc = rhs.type == .deletion ? (rhs.displayRange?.location ?? 0) : rhs.range.location
+            return lhsLoc < rhsLoc
+        }
         
         return changes
     }
