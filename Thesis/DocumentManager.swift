@@ -65,32 +65,68 @@ class DocumentManager: ObservableObject {
     }
     
     private func createWelcomeDocument() {
-        let welcome = Document(title: "Welcome to Thesis")
-        welcome.currentContent = """
-Welcome to Thesis - A modal editor for thought evolution.
+            let welcome = Document(title: "Welcome to Thesis")
+            welcome.currentContent = """
+    Welcome to Thesis - A modal editor for thought evolution.
 
-You are currently in INSERT mode. Type freely to capture your thoughts.
+    You are currently in INSERT mode. Type freely to capture your thoughts.
+    When ready, press ESC. You'll be prompted to save this as your First Draft.
 
-When ready, press ESC. You'll be prompted to save this as your First Draft.
+    --- MODE SWITCHING ---
+    ESC        : Exit Insert/Command modes -> Edit Mode
+    i          : Insert (Word context)
+    a          : Append (Jump to end of sentence -> Insert)
+    :          : Enter Command Mode (type 'comp' or 'print')
 
-After saving, you'll enter EDIT mode where you can:
-- Navigate: h (prev sentence), l (next sentence), j (next para), k (prev para)
-- Delete: dw (word), das (sentence), dap (paragraph), D (to end of sentence)
-- Change: cw (word), cas (sentence), cap (paragraph), C (to end of sentence)
-- Insert: i (insert word), a (append sentence)
-- Undo: u (undo last 10 commands)
+    --- NAVIGATION ---
+    Clauses    : h (prev), l (next)
+    Sentences  : Shift+H (prev), Shift+L (next)
+    Paragraphs : k (prev), j (next)
+    Lines      : Shift+K (prev), Shift+J (next)
+    Words      : b (prev), w (next)
 
-To review your changes:
-- Type :comp or press Cmd+D to see a diff view
-- Use n (next change) and p (previous change) to navigate
-- Type :print or press Cmd+S to save as a new draft
+    --- SEMANTIC EDITING ---
+    (d=delete, c=change/replace, r=refine)
 
-Try editing this document to learn the workflow!
-"""
-        documents.append(welcome)
-        selectedDocument = welcome
-        saveDocuments()
-    }
+    Clauses:
+      dc  : Delete Clause
+      cc  : Change Clause
+      rc  : Refine Clause
+
+    Sentences:
+      das : Delete Sentence
+      cas : Change Sentence
+      rs  : Refine Sentence
+
+    Paragraphs:
+      dap : Delete Paragraph
+      cap : Change Paragraph
+      rp  : Refine Paragraph
+
+    Words:
+      dw  : Delete Word (Forward)
+      db  : Delete Word (Backward)
+      cw  : Change Word
+      rw  : Refine Word
+
+    To End of Sentence:
+      D   : Delete to end
+      C   : Change to end
+      R   : Refine to end
+
+    --- HISTORY & REVIEW ---
+    u          : Undo last command
+    Cmd+D      : Compare Mode (Diff View)
+    Cmd+S      : Save/Print Draft
+
+    In Compare Mode:
+      n / p    : Next / Previous change
+      ESC      : Exit comparison
+    """
+            documents.append(welcome)
+            selectedDocument = welcome
+            saveDocuments()
+        }
     
     deinit {
         autoSaveTimer?.invalidate()
