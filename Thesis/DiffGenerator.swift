@@ -10,24 +10,28 @@ struct DiffChange: Identifiable {
     let text: String
     let displayRange: NSRange?
     
+    // NEW: Stores the previous version for phantom display
+    let oldText: String?
+    
     enum ChangeType {
         case addition
         case deletion
         case unchanged
     }
     
-    init(type: ChangeType, range: NSRange, text: String, displayRange: NSRange? = nil, semanticType: SemanticChangeType? = nil) {
+    init(type: ChangeType, range: NSRange, text: String, displayRange: NSRange? = nil, semanticType: SemanticChangeType? = nil, oldText: String? = nil) {
         self.type = type
         self.range = range
         self.text = text
         self.displayRange = displayRange
         self.semanticType = semanticType
+        self.oldText = oldText
     }
 }
 
 class DiffGenerator {
     
-    /// Generate a diff with semantic type information
+    /// Generate a diff with semantic type information and phantom text support
     /// - Parameters:
     ///   - oldText: Previous version content
     ///   - newText: Current version content
@@ -43,11 +47,12 @@ class DiffGenerator {
         let oldSentenceSet = Set(oldSentences.map { $0.text })
         let newSentenceSet = Set(newSentences.map { $0.text })
         
-        // Create semantic type lookup for new sentences
-        var semanticTypeMap: [String: SemanticChangeType] = [:]
+        // REFACTOR: Map to the full SemanticChange object, not just the type
+        // This allows us to retrieve 'beforeText' (oldText) for inline display
+        var semanticMap: [String: SemanticChange] = [:]
         for change in changes {
             if let afterText = change.afterText {
-                semanticTypeMap[afterText] = change.type
+                semanticMap[afterText] = change
             }
         }
         
@@ -68,13 +73,17 @@ class DiffGenerator {
                 ))
             } else {
                 // Added or refined sentence - check semantic type
-                let semanticType = semanticTypeMap[text] ?? .added
+                let changeRecord = semanticMap[text]
+                let semanticType = changeRecord?.type ?? .added
+                let previousVersion = changeRecord?.beforeText // Capture the old text
                 
                 diffChanges.append(DiffChange(
                     type: .addition,
                     range: range,
                     text: text,
-                    semanticType: semanticType
+                    displayRange: nil,
+                    semanticType: semanticType,
+                    oldText: previousVersion // Store it
                 ))
             }
             
@@ -106,7 +115,8 @@ class DiffGenerator {
                     range: oldSentence.range,
                     text: oldSentence.text,
                     displayRange: NSRange(location: displayLocation, length: 0),
-                    semanticType: semanticType
+                    semanticType: semanticType,
+                    oldText: nil
                 ))
             }
         }

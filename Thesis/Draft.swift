@@ -44,7 +44,7 @@ struct Draft: Identifiable, Codable, Equatable {
         return name
     }
     
-    // ENHANCED: Change summary
+    // ENHANCED: Change summary for history view
     var changeSummary: String {
         guard !changes.isEmpty else {
             return isFirstDraft ? "Initial capture" : "No changes"
@@ -53,12 +53,10 @@ struct Draft: Identifiable, Codable, Equatable {
         return ChangeSummary(changes: changes).text
     }
     
-    // Breakdown of changes by type
     var changeBreakdown: [(type: SemanticChangeType, count: Int)] {
         return ChangeSummary(changes: changes).breakdown
     }
     
-    // Total number of semantic changes
     var changeCount: Int {
         return changes.count
     }

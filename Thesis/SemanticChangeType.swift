@@ -1,10 +1,6 @@
-//
 //  SemanticChangeType.swift
 //  Thesis
 //
-//  Created by Zhi Zheng Yeo on 7/2/26.
-//
-
 
 import Foundation
 
@@ -61,6 +57,7 @@ enum SemanticChangeType: String, Codable, Equatable {
 
 enum TextUnitType: String, Codable {
     case word
+    case clause
     case sentence
     case paragraph
     case section

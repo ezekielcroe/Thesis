@@ -11,8 +11,6 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
     
     // Branch tracking for version control
     @Published var activeBranchParentId: UUID?
-    
-    // ENHANCED: Track semantic changes in current editing session
     @Published var sessionChanges: [SemanticChange]
     
     enum CodingKeys: String, CodingKey {
@@ -40,6 +38,8 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         workingDraft = try container.decodeIfPresent(WorkingDraft.self, forKey: .workingDraft)
         lastModified = try container.decode(Date.self, forKey: .lastModified)
         activeBranchParentId = try container.decodeIfPresent(UUID.self, forKey: .activeBranchParentId)
+        
+        // Safely decode sessionChanges, defaulting to empty if missing from older saves
         sessionChanges = try container.decodeIfPresent([SemanticChange].self, forKey: .sessionChanges) ?? []
     }
     
@@ -114,8 +114,10 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         updateWorkingDraft()
     }
     
-    // ENHANCED: Add a semantic change to the session
+    // NEW: Add a semantic change to the session
+    // This fixes the error: "Value of type 'Document' has no dynamic member 'recordChange'"
     func recordChange(_ change: SemanticChange) {
+        // We use MainActor logic (via dispatch) to ensure UI updates are safe
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.sessionChanges.append(change)
@@ -138,6 +140,7 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         guard let lastDraft = drafts.last else {
             return !currentContent.isEmpty
         }
+        // It's unsaved if text changed OR if we have tracked semantic changes
         return currentContent != lastDraft.content || !sessionChanges.isEmpty
     }
     

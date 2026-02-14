@@ -44,6 +44,51 @@ class TextAnalyzer {
         return sentences.last { $0.range.location < position }
     }
     
+    // MARK: - Clause Detection
+    
+    static func getClauses(in text: String) -> [TextUnit] {
+        var clauses: [TextUnit] = []
+        let sentences = getSentences(in: text)
+        let nsText = text as NSString
+        
+        let tagger = NLTagger(tagSchemes: [.lexicalClass])
+        
+        for sentence in sentences {
+            tagger.string = sentence.text
+            var lastBoundary = 0
+            
+            tagger.enumerateTags(in: sentence.text.startIndex..<sentence.text.endIndex,
+                                unit: .word,
+                                scheme: .lexicalClass) { tag, range in
+                
+                let wordRange = NSRange(range, in: sentence.text)
+                let word = (sentence.text as NSString).substring(with: wordRange).lowercased()
+                
+                // Define boundaries: Punctuation or Conjunctions
+                let isBoundaryPunctuation = (tag == .punctuation && (word == "," || word == ";" || word == ":"))
+                let isConjunction = (tag == .conjunction)
+                
+                if isBoundaryPunctuation || isConjunction {
+                    let length = wordRange.location - lastBoundary
+                    if length > 0 {
+                        let clauseRange = NSRange(location: sentence.range.location + lastBoundary, length: length)
+                        clauses.append(TextUnit(range: clauseRange, text: nsText.substring(with: clauseRange)))
+                    }
+                    lastBoundary = wordRange.location
+                }
+                return true
+            }
+            
+            // Add the final trailing clause of the sentence
+            let finalLength = sentence.range.length - lastBoundary
+            if finalLength > 0 {
+                let finalRange = NSRange(location: sentence.range.location + lastBoundary, length: finalLength)
+                clauses.append(TextUnit(range: finalRange, text: nsText.substring(with: finalRange)))
+            }
+        }
+        return clauses
+    }
+    
     // MARK: - Paragraph Detection
     
     static func getParagraphs(in text: String) -> [TextUnit] {
