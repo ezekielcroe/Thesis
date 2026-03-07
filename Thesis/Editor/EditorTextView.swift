@@ -54,8 +54,9 @@ struct EditorTextView: NSViewRepresentable {
         textView.delegate = context.coordinator
         
         let coordinator = context.coordinator
+        // FIX 1: The callback now returns the engine's mode after processing.
         textView.onKeyPress = { key, mods in
-            coordinator.parent.onKeyPress(key, mods)
+            return coordinator.parent.onKeyPress(key, mods)
         }
         
         scrollView.documentView = textView
@@ -63,6 +64,8 @@ struct EditorTextView: NSViewRepresentable {
     }
     
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.parent = self
+        
         guard let textView = scrollView.documentView as? ModalNSTextView else { return }
         textView.currentMode = mode
         textView.diffChanges = diffChanges
@@ -71,6 +74,9 @@ struct EditorTextView: NSViewRepresentable {
             textView.string = text
         }
         
+        // 1. Record if we have focus before the transition
+        let wasFocused = textView.window?.firstResponder == textView
+        
         switch mode {
         case .freeText, .insert:
             textView.isEditable = true
@@ -78,6 +84,13 @@ struct EditorTextView: NSViewRepresentable {
         default:
             textView.isEditable = false
             textView.isSelectable = true
+        }
+        
+        // 2. Reclaim focus if toggling isEditable accidentally dropped it
+        if wasFocused && textView.window?.firstResponder != textView {
+            DispatchQueue.main.async {
+                textView.window?.makeFirstResponder(textView)
+            }
         }
         
         let safePos = min(cursorPosition, textView.string.count)
@@ -133,7 +146,7 @@ struct EditorTextView: NSViewRepresentable {
             if r.length > 0 {
                 layoutManager.addTemporaryAttribute(
                     .backgroundColor,
-                    value: NSColor.systemBlue.withAlphaComponent(0.3),
+                    value: NSColor.systemCyan.withAlphaComponent(0.6),
                     forCharacterRange: r
                 )
             }
@@ -169,6 +182,9 @@ class ModalNSTextView: NSTextView {
     var diffChanges: [DiffChange] = []
     var onKeyPress: ((String, NSEvent.ModifierFlags) -> Void)?
     
+    // Ensure AppKit always allows this view to hold focus
+    override var acceptsFirstResponder: Bool { true }
+    
     override func keyDown(with event: NSEvent) {
         let chars = event.charactersIgnoringModifiers ?? ""
         let modifiers = event.modifierFlags
@@ -179,25 +195,19 @@ class ModalNSTextView: NSTextView {
             super.keyDown(with: event)
             
         case .insert:
-            // 1. Always allow Escape
             if chars == "\u{1B}" {
                 onKeyPress?(chars, modifiers)
                 return
             }
             
-            // 2. Block navigation keys to protect semantic tracking
-            // KeyCodes: Left(123), Right(124), Down(125), Up(126)
-            // Home(115), End(119), PgUp(116), PgDn(121)
             let navKeys: Set<UInt16> = [123, 124, 125, 126, 115, 116, 119, 121]
             if navKeys.contains(event.keyCode) {
-                NSSound.beep() // Inform user they are locked
-                return // Drop the event entirely
+                NSSound.beep()
+                return
             }
             
-            // 3. Let normal typing pass through
             super.keyDown(with: event)
             
-            // 4. Notify Engine to check for auto-exit conditions
             DispatchQueue.main.async { [weak self] in
                 self?.onKeyPress?(chars, modifiers)
             }
@@ -210,7 +220,6 @@ class ModalNSTextView: NSTextView {
     override func mouseDown(with event: NSEvent) {
         switch currentMode {
         case .insert:
-            // Block mouse navigation to protect semantic insert boundaries
             NSSound.beep()
             return
         case .freeText, .normal, .visual, .comp, .search:

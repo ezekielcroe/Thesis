@@ -1,51 +1,7 @@
 // Annotation.swift — Thesis
-// Positional annotations with categories, fuzzy anchor tracking, and navigation
+// Positional annotations with fuzzy anchor tracking and navigation
 
 import Foundation
-
-// MARK: - Annotation Category
-
-enum AnnotationCategory: String, Codable, CaseIterable, Equatable {
-    case note       = "note"
-    case todo       = "todo"
-    case question   = "question"
-    case research   = "research"
-    case fix        = "fix"
-    case idea       = "idea"
-    
-    var displayName: String {
-        switch self {
-        case .note:     return "Note"
-        case .todo:     return "To Do"
-        case .question: return "Question"
-        case .research: return "Research"
-        case .fix:      return "Fix"
-        case .idea:     return "Idea"
-        }
-    }
-    
-    var icon: String {
-        switch self {
-        case .note:     return "note.text"
-        case .todo:     return "checkmark.circle"
-        case .question: return "questionmark.circle"
-        case .research: return "magnifyingglass"
-        case .fix:      return "wrench"
-        case .idea:     return "lightbulb"
-        }
-    }
-    
-    var color: String {
-        switch self {
-        case .note:     return "purple"
-        case .todo:     return "orange"
-        case .question: return "blue"
-        case .research: return "green"
-        case .fix:      return "red"
-        case .idea:     return "yellow"
-        }
-    }
-}
 
 // MARK: - Annotation
 
@@ -54,25 +10,50 @@ struct Annotation: Identifiable, Codable, Equatable {
     var text: String
     var anchorText: String
     var anchorPosition: Int
-    var category: AnnotationCategory
     var resolved: Bool
     let createdAt: Date
     var updatedAt: Date
     
+    // CodingKeys includes legacy "category" so old data doesn't crash
+    enum CodingKeys: String, CodingKey {
+        case id, text, anchorText, anchorPosition, resolved, createdAt, updatedAt, category
+    }
+    
     init(
         text: String,
         anchorText: String,
-        anchorPosition: Int,
-        category: AnnotationCategory = .note
+        anchorPosition: Int
     ) {
         self.id = UUID()
         self.text = text
         self.anchorText = anchorText
         self.anchorPosition = anchorPosition
-        self.category = category
         self.resolved = false
         self.createdAt = Date()
         self.updatedAt = Date()
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        text = try container.decode(String.self, forKey: .text)
+        anchorText = try container.decode(String.self, forKey: .anchorText)
+        anchorPosition = try container.decode(Int.self, forKey: .anchorPosition)
+        resolved = try container.decode(Bool.self, forKey: .resolved)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        // Old "category" field is silently ignored
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(text, forKey: .text)
+        try container.encode(anchorText, forKey: .anchorText)
+        try container.encode(anchorPosition, forKey: .anchorPosition)
+        try container.encode(resolved, forKey: .resolved)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
     }
     
     /// Find the current range of this annotation's anchor text in the document.
@@ -95,12 +76,11 @@ struct Annotation: Identifiable, Codable, Equatable {
         let fullRange = nsContent.range(of: anchorText)
         if fullRange.location != NSNotFound { return fullRange }
         
-        // 3. Fuzzy match: try with first 30 characters (handles partial edits to anchor text)
+        // 3. Fuzzy match: try with first 30 characters
         if anchorText.count > 30 {
             let prefix = String(anchorText.prefix(30))
             let prefixRange = nsContent.range(of: prefix)
             if prefixRange.location != NSNotFound {
-                // Extend to a reasonable length
                 let endPos = min(prefixRange.location + anchorText.count + 20, nsContent.length)
                 return NSRange(location: prefixRange.location, length: endPos - prefixRange.location)
             }
@@ -113,7 +93,6 @@ struct Annotation: Identifiable, Codable, Equatable {
         return nil
     }
     
-    /// Update the anchor position to match current document state
     mutating func updateAnchorPosition(in content: String) {
         if let range = currentRange(in: content) {
             anchorPosition = range.location
@@ -127,7 +106,6 @@ struct Annotation: Identifiable, Codable, Equatable {
     }
     
     var isStale: Bool {
-        // An annotation is stale if created more than 30 days ago and unresolved
         !resolved && createdAt.timeIntervalSinceNow < -2_592_000
     }
 }

@@ -36,7 +36,7 @@ struct ModalEditor: View {
                         highlightRange: $engine.highlightRange,
                         flashRange: $engine.flashRange,
                         selectionRange: $engine.selectionRange,
-                        diffChanges: $engine.diffChanges, // Can optionally remove from EditorTextView now
+                        diffChanges: $engine.diffChanges,
                         onTextChange: { engine.handleTextChange() },
                         onKeyPress: { key, mods in engine.handleKeyPress(key, modifiers: mods) },
                         onModeChange: { newMode in engine.handleModeChange(newMode) }
@@ -102,8 +102,26 @@ struct ModalEditor: View {
             case .annotation(let anchorText, let position):
                 AnnotationSheet(
                     anchorText: anchorText,
-                    onSave: { noteText, category in
-                        document.addAnnotation(text: noteText, anchorText: anchorText, position: position, category: category)
+                    onSave: { noteText in
+                        document.addAnnotation(text: noteText, anchorText: anchorText, position: position)
+                        engine.mode = .normal
+                    }
+                )
+            case .citation(let anchorText, let insertPosition):
+                CitationSheet(
+                    anchorText: anchorText,
+                    existingKeys: Set(document.citations.map(\.key)),
+                    onSave: { key, source in
+                        let marker = " [\(key)]"
+                        let nsText = document.currentContent as NSString
+                        let safePos = min(insertPosition, nsText.length)
+                        document.currentContent = nsText.replacingCharacters(
+                            in: NSRange(location: safePos, length: 0),
+                            with: marker
+                        )
+                        document.addCitation(key: key, source: source, anchorText: anchorText)
+                        engine.cursorPosition = safePos + marker.count
+                        engine.handleTextChange()
                         engine.mode = .normal
                     }
                 )
@@ -171,10 +189,8 @@ struct ModalEditor: View {
         let changeIndices = DiffGenerator.getChangeIndices(in: engine.diffChanges)
         guard !changeIndices.isEmpty else { return nil }
         
-        // Find which change number the user is currently on (0-based position within changes-only list)
         let positionInChanges = changeIndices.firstIndex(of: engine.currentDiffIndex) ?? 0
         
-        // Get the actual current change entry
         let currentChange = engine.diffChanges.indices.contains(engine.currentDiffIndex)
             ? engine.diffChanges[engine.currentDiffIndex]
             : engine.diffChanges[changeIndices[positionInChanges]]

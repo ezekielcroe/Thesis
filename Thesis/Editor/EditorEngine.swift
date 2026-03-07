@@ -1,11 +1,3 @@
-//
-//  EditorSheet.swift
-//  Thesis
-//
-//  Created by Zhi Zheng Yeo on 22/2/26.
-//
-
-
 // EditorEngine.swift — Thesis
 // Dedicated controller for Vim-style modal editing, text mutation, and change tracking.
 
@@ -17,6 +9,7 @@ enum EditorSheet: Identifiable {
     case firstDraft
     case save
     case annotation(anchorText: String, position: Int)
+    case citation(anchorText: String, insertPosition: Int)
     case branch
     case merge
     case log
@@ -27,6 +20,7 @@ enum EditorSheet: Identifiable {
         case .firstDraft: return "firstDraft"
         case .save: return "save"
         case .annotation: return "annotation"
+        case .citation: return "citation"
         case .branch: return "branch"
         case .merge: return "merge"
         case .log: return "log"
@@ -58,13 +52,13 @@ class EditorEngine: ObservableObject {
     @Published var currentSearchIndex: Int = 0
     
     // Argument Structure State
-    @Published var pendingArgument: Bool = false   // Tracks ' prefix for argument commands
+    @Published var pendingArgument: Bool = false
     
     // Internal Engine State
     private var insertContext: InsertContext?
     private var movePayloadType: TextUnitType?
     @Published var currentDiffIndex: Int = 0
-    private var pendingG: Bool = false   // Tracks first 'g' press for gg (jump-to-top)
+    private var pendingG: Bool = false
     
     let undoStack = UndoStack()
     let pendingChangeTracker = PendingChangeTracker()
@@ -152,109 +146,91 @@ class EditorEngine: ObservableObject {
     }
     
     // MARK: - Insert Mode
-        
-        private func handleInsertKey(_ chars: String, context: InsertContext) {
-            if chars == "\u{1B}" {
-                completeInsertMode()
-                return
-            }
-            
-            guard context != .freeform else { return }
-            
-            let nsText = document.currentContent as NSString
-            
-            switch context {
-            case .word:
-                // Exit on space
-                if chars == " " {
-                    scheduleAutoExit()
-                }
-                
-            case .sentence:
-                // Exit on terminal punctuation
-                if chars == "." || chars == "!" || chars == "?" {
-                    scheduleAutoExit()
-                }
-                
-            case .paragraph:
-                // Exit on double newline
-                if chars == "\n" && cursorPosition > 0 && cursorPosition <= nsText.length {
-                    let prevChar = nsText.substring(with: NSRange(location: cursorPosition - 1, length: 1))
-                    if prevChar == "\n" {
-                        scheduleAutoExit()
-                    }
-                }
-                
-            case .clause:
-                // Exit on punctuation OR space after a conjunction
-                if chars == "," || chars == ";" || chars == ":" {
-                    scheduleAutoExit()
-                } else if chars == " " {
-                    let prevWord = getWordBeforeCursor()
-                    let conjunctions: Set<String> = [
-                        "and", "but", "or", "so", "yet", "for", "nor", // Coordinating
-                        "although", "because", "since", "unless", "if", "while", "whereas" // Subordinating
-                    ]
-                    
-                    if conjunctions.contains(prevWord.lowercased()) {
-                        scheduleAutoExit()
-                    }
-                }
-                
-            case .line:
-                // Exit on single newline
-                if chars == "\n" {
-                    scheduleAutoExit()
-                }
-                
-            default:
-                break
-            }
+    
+    private func handleInsertKey(_ chars: String, context: InsertContext) {
+        if chars == "\u{1B}" {
+            completeInsertMode()
+            return
         }
         
-        private func scheduleAutoExit() {
-            // Yield to the main thread so the character is fully typed into the text view
-            // before we pull the user out of Insert Mode and complete the diff tracking.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                self?.completeInsertMode()
-            }
-        }
+        guard context != .freeform else { return }
         
-        /// Helper: Grabs the word immediately preceding the cursor, ignoring trailing spaces.
-        private func getWordBeforeCursor() -> String {
-            let nsText = document.currentContent as NSString
-            guard cursorPosition > 0 && cursorPosition <= nsText.length else { return "" }
-            
-            var pos = cursorPosition - 1
-            
-            // 1. Skip trailing spaces/newlines just in case
-            while pos >= 0 {
-                let char = nsText.substring(with: NSRange(location: pos, length: 1))
-                if char != " " && char != "\n" { break }
-                pos -= 1
+        let nsText = document.currentContent as NSString
+        
+        switch context {
+        case .word:
+            if chars == " " {
+                scheduleAutoExit()
             }
             
-            let endPos = pos + 1
-            
-            // 2. Find start of the word
-            while pos >= 0 {
-                let char = nsText.substring(with: NSRange(location: pos, length: 1))
-                if char == " " || char == "\n" { break }
-                pos -= 1
+        case .sentence:
+            if chars == "." || chars == "!" || chars == "?" {
+                scheduleAutoExit()
             }
             
-            let startPos = pos + 1
-            
-            // 3. Extract it
-            if endPos > startPos {
-                return nsText.substring(with: NSRange(location: startPos, length: endPos - startPos))
+        case .paragraph:
+            if chars == "\n" && cursorPosition > 0 && cursorPosition <= nsText.length {
+                let prevChar = nsText.substring(with: NSRange(location: cursorPosition - 1, length: 1))
+                if prevChar == "\n" {
+                    scheduleAutoExit()
+                }
             }
-            return ""
+            
+        case .clause:
+            if chars == "," || chars == ";" || chars == ":" {
+                scheduleAutoExit()
+            } else if chars == " " {
+                let prevWord = getWordBeforeCursor()
+                let conjunctions: Set<String> = [
+                    "and", "but", "or", "so", "yet", "for", "nor",
+                    "although", "because", "since", "unless", "if", "while", "whereas"
+                ]
+                if conjunctions.contains(prevWord.lowercased()) {
+                    scheduleAutoExit()
+                }
+            }
+            
+        case .line:
+            if chars == "\n" {
+                scheduleAutoExit()
+            }
+            
+        default:
+            break
         }
+    }
+    
+    private func scheduleAutoExit() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.completeInsertMode()
+        }
+    }
+    
+    private func getWordBeforeCursor() -> String {
+        let nsText = document.currentContent as NSString
+        guard cursorPosition > 0 && cursorPosition <= nsText.length else { return "" }
+        
+        var pos = cursorPosition - 1
+        while pos >= 0 {
+            let char = nsText.substring(with: NSRange(location: pos, length: 1))
+            if char != " " && char != "\n" { break }
+            pos -= 1
+        }
+        let endPos = pos + 1
+        while pos >= 0 {
+            let char = nsText.substring(with: NSRange(location: pos, length: 1))
+            if char == " " || char == "\n" { break }
+            pos -= 1
+        }
+        let startPos = pos + 1
+        if endPos > startPos {
+            return nsText.substring(with: NSRange(location: startPos, length: endPos - startPos))
+        }
+        return ""
+    }
     
     private func completeInsertMode() {
         if pendingChangeTracker.hasPending {
-            // CRITICAL: Capture insertStartPosition BEFORE completeChange() clears it
             let capturedStartPos = pendingChangeTracker.insertStartPosition
             
             if let completed = pendingChangeTracker.completeChange(
@@ -309,7 +285,7 @@ class EditorEngine: ObservableObject {
             return
         }
         
-        // Handle G (Shift+g) before lowercasing — jump to bottom
+        // Handle G (Shift+g) — jump to bottom
         if char == "G" && isShift {
             pendingG = false
             cursorPosition = (document.currentContent as NSString).length
@@ -329,31 +305,28 @@ class EditorEngine: ObservableObject {
             return
         }
         
-        // Any other key cancels a pending g
         pendingG = false
         
         // Handle ' (argument structure prefix)
         if char == "'" && !isShift {
             if pendingArgument {
-                pendingArgument = false  // Double-press cancels
+                pendingArgument = false
             } else {
                 pendingArgument = true
             }
             return
         }
         
-        // If argument prefix is pending, dispatch argument command
         if pendingArgument {
             pendingArgument = false
             if let argType = parseArgumentType(char.lowercased()) {
                 executeArgumentCommand(argType)
                 return
             }
-            // Unrecognized second key — fall through to normal handling
         }
         
         switch char.lowercased() {
-        // Navigation — sentence-first (spec §1.3: "sentences are the atoms of thought")
+        // Navigation — sentence-first
         case "h": isShift ? navigateClause(forward: false) : navigateSentence(forward: false)
         case "l": isShift ? navigateClause(forward: true) : navigateSentence(forward: true)
         case "j": isShift ? navigateLine(forward: true) : navigateParagraph(forward: true)
@@ -361,10 +334,10 @@ class EditorEngine: ObservableObject {
         case "w": navigateWord(forward: true)
         case "b": navigateWord(forward: false)
             
-        // Verbs
+        // Verbs (updated: r=replace, c=cite)
         case "d": isShift ? executeDeleteToEnd() : startPendingVerb(.delete)
-        case "c": isShift ? executeChangeToEnd() : startPendingVerb(.change)
-        case "r": isShift ? executeRefineToEnd() : startPendingVerb(.refine)
+        case "r": isShift ? executeReplaceToEnd() : startPendingVerb(.replace)
+        case "c": isShift ? executeCiteToEnd() : startPendingVerb(.cite)
         case "y": startPendingVerb(.yank)
         case "m": startPendingVerb(.markup)
         case "x": startPendingVerb(.move)
@@ -380,7 +353,7 @@ class EditorEngine: ObservableObject {
         case ":": mode = .command("")
         case "/": enterSearchMode()
             
-        // Search navigation (n/N cycle through last search results)
+        // Search navigation
         case "n": isShift ? navigateSearchResult(forward: false) : navigateSearchResult(forward: true)
             
         default: break
@@ -410,12 +383,12 @@ class EditorEngine: ObservableObject {
         let unitType = objectTextUnitType(object)
         
         switch verb {
-        case .delete: executeDelete(unit: unit, unitType: unitType)
-        case .change: executeChange(unit: unit, unitType: unitType, object: object)
-        case .refine: executeRefine(unit: unit, unitType: unitType, object: object)
-        case .yank:   executeYank(unit: unit, unitType: unitType)
-        case .markup: executeMarkup(unit: unit, unitType: unitType)
-        case .move:   startMove(unit: unit, unitType: unitType)
+        case .delete:  executeDelete(unit: unit, unitType: unitType)
+        case .replace: executeReplace(unit: unit, unitType: unitType, object: object)
+        case .cite:    executeCite(unit: unit, unitType: unitType)
+        case .yank:    executeYank(unit: unit, unitType: unitType)
+        case .markup:  executeMarkup(unit: unit, unitType: unitType)
+        case .move:    startMove(unit: unit, unitType: unitType)
         }
     }
     
@@ -428,7 +401,8 @@ class EditorEngine: ObservableObject {
         highlightRangeBriefly(range) { self.performDelete(range: range, change: change) }
     }
     
-    private func executeChange(unit: TextUnit, unitType: TextUnitType, object: EditObject) {
+    /// Unified replace: deletes the unit and enters insert mode to type the replacement
+    private func executeReplace(unit: TextUnit, unitType: TextUnitType, object: EditObject) {
         let range = unitType == .word ? TextAnalyzer.expandToTrailingSpace(unit.range, in: document.currentContent) : unit.range
         let ctx = objectInsertContext(object)
         
@@ -441,17 +415,10 @@ class EditorEngine: ObservableObject {
         }
     }
     
-    private func executeRefine(unit: TextUnit, unitType: TextUnitType, object: EditObject) {
-        let range = unitType == .word ? TextAnalyzer.expandToTrailingSpace(unit.range, in: document.currentContent) : unit.range
-        let ctx = objectInsertContext(object)
-        
-        pendingChangeTracker.startChange(type: .refined, unitType: unitType, beforeText: unit.text, position: range.location, context: "refined \(unitType.rawValue)")
-        
-        highlightRangeBriefly(range) {
-            self.performDelete(range: range, change: nil)
-            self.mode = .insert(ctx)
-            self.insertContext = ctx
-        }
+    /// Cite: flash the text unit and open a citation sheet; marker will be inserted at the end of the unit
+    private func executeCite(unit: TextUnit, unitType: TextUnitType) {
+        flashUnit(unit)
+        activeSheet = .citation(anchorText: unit.text, insertPosition: unit.endLocation)
     }
     
     private func executeYank(unit: TextUnit, unitType: TextUnitType) {
@@ -507,9 +474,9 @@ class EditorEngine: ObservableObject {
         highlightRangeBriefly(rest.range) { self.performDelete(range: rest.range, change: change) }
     }
     
-    private func executeChangeToEnd() {
+    private func executeReplaceToEnd() {
         guard let rest = TextAnalyzer.getRestOfSentence(from: cursorPosition, in: document.currentContent) else { return }
-        pendingChangeTracker.startChange(type: .replaced, unitType: .sentence, beforeText: rest.text, position: rest.range.location, context: "change to end")
+        pendingChangeTracker.startChange(type: .replaced, unitType: .sentence, beforeText: rest.text, position: rest.range.location, context: "replace to end")
         highlightRangeBriefly(rest.range) {
             self.performDelete(range: rest.range, change: nil)
             self.mode = .insert(.sentence)
@@ -517,14 +484,12 @@ class EditorEngine: ObservableObject {
         }
     }
     
-    private func executeRefineToEnd() {
+    /// C (shift-c): cite the rest of the current sentence
+    private func executeCiteToEnd() {
         guard let rest = TextAnalyzer.getRestOfSentence(from: cursorPosition, in: document.currentContent) else { return }
-        pendingChangeTracker.startChange(type: .refined, unitType: .sentence, beforeText: rest.text, position: rest.range.location, context: "refine to end")
-        highlightRangeBriefly(rest.range) {
-            self.performDelete(range: rest.range, change: nil)
-            self.mode = .insert(.sentence)
-            self.insertContext = .sentence
-        }
+        flashRange = rest.range
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { self.flashRange = nil }
+        activeSheet = .citation(anchorText: rest.text, insertPosition: rest.endLocation)
     }
     
     private func startInsert(context: InsertContext) {
@@ -599,27 +564,20 @@ class EditorEngine: ObservableObject {
     }
     
     private func repeatLastCommand() {
-        guard let last = lastCommand, let obj = last.object, let unit = resolveUnit(for: obj) else { return }
+        guard let last = lastCommand, let obj = last.object, let _ = resolveUnit(for: obj) else { return }
         executeVerbObject(verb: last.verb, objectKey: obj.rawValue, isShift: false)
     }
     
     // MARK: - Visual Mode
     
     private func enterVisualMode() {
-        let visualAnchor = cursorPosition
         selectionRange = NSRange(location: cursorPosition, length: 0)
         mode = .visual(.character)
-        
-        // Use an associated value trick or temporary state for visual anchor if needed.
-        // For simplicity, visual anchor is tracked via selectionRange start here.
     }
     
     private func handleVisualKey(_ chars: String, modifiers: NSEvent.ModifierFlags) {
         guard let char = chars.first.map({ String($0).lowercased() }) else { return }
         if char == "\u{1B}" { selectionRange = nil; mode = .normal; return }
-        
-        // Add navigation and execution (ported similarly to your ModalEditor)
-        // ... omitted for brevity but follows same pattern as Normal Mode ...
     }
     
     // MARK: - Command Mode
@@ -659,7 +617,14 @@ class EditorEngine: ObservableObject {
     private func enterCompMode() {
         guard let headDraft = document.currentBranchHead else { mode = .normal; return }
         diffChanges = DiffGenerator.generateDiff(from: headDraft.content, to: document.currentContent, withChanges: document.sessionChanges)
-        currentDiffIndex = DiffGenerator.getChangeIndices(in: diffChanges).first ?? 0
+        let changeIndices = DiffGenerator.getChangeIndices(in: diffChanges)
+        if changeIndices.isEmpty {
+            // No changes detected — stay in normal mode
+            diffChanges = []
+            mode = .normal
+            return
+        }
+        currentDiffIndex = changeIndices.first ?? 0
         mode = .comp
         navigateToCurrentDiffChange()
     }
@@ -703,7 +668,6 @@ class EditorEngine: ObservableObject {
             return
         }
         if char == "\r" || char == "\n" {
-            // Confirm search, jump to first match, return to normal mode
             if !searchMatches.isEmpty {
                 let match = searchMatches[currentSearchIndex]
                 cursorPosition = match.location
@@ -713,7 +677,6 @@ class EditorEngine: ObservableObject {
             return
         }
         if char == "\u{7F}" {
-            // Backspace
             let newQuery = current.isEmpty ? "" : String(current.dropLast())
             mode = .search(newQuery)
             updateSearchResults(for: newQuery)
@@ -744,14 +707,12 @@ class EditorEngine: ObservableObject {
         
         searchMatches = matches
         
-        // Jump to nearest match from current cursor position
         if let nearestIdx = matches.firstIndex(where: { $0.location >= cursorPosition }) {
             currentSearchIndex = nearestIdx
         } else if !matches.isEmpty {
             currentSearchIndex = 0
         }
         
-        // Highlight current match
         if !matches.isEmpty && currentSearchIndex < matches.count {
             let match = matches[currentSearchIndex]
             cursorPosition = match.location
@@ -761,7 +722,6 @@ class EditorEngine: ObservableObject {
         }
     }
     
-    /// Navigate search results from normal mode (n/N)
     private func navigateSearchResult(forward: Bool) {
         guard !searchMatches.isEmpty else { return }
         if forward {
@@ -772,7 +732,6 @@ class EditorEngine: ObservableObject {
         let match = searchMatches[currentSearchIndex]
         cursorPosition = match.location
         highlightRange = match
-        // Auto-clear highlight after a moment
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             if self?.highlightRange == match { self?.highlightRange = nil }
         }
@@ -791,22 +750,18 @@ class EditorEngine: ObservableObject {
         }
     }
     
-    /// Execute an argument structure command: position cursor, insert prefix, enter insert mode
     private func executeArgumentCommand(_ argType: ArgumentType) {
         let nsText = document.currentContent as NSString
         
-        // Determine insert position based on argument type
         let insertPos: Int
         switch argType {
         case .evidence, .counterargument, .rebuttal:
-            // Insert after current sentence
             if let sentence = analyzer.sentenceAt(cursorPosition, in: document.currentContent) {
                 insertPos = sentence.endLocation
             } else {
                 insertPos = min(cursorPosition, nsText.length)
             }
         case .bridge:
-            // Insert between current and next paragraph
             let paras = analyzer.paragraphs(in: document.currentContent)
             if let currentPara = paras.first(where: { NSLocationInRange(cursorPosition, $0.range) }) {
                 insertPos = currentPara.endLocation
@@ -814,7 +769,6 @@ class EditorEngine: ObservableObject {
                 insertPos = min(cursorPosition, nsText.length)
             }
         case .transition:
-            // Insert at the start of the current sentence
             if let sentence = analyzer.sentenceAt(cursorPosition, in: document.currentContent) {
                 insertPos = sentence.range.location
             } else {
@@ -822,7 +776,6 @@ class EditorEngine: ObservableObject {
             }
         }
         
-        // Insert prefix text and a space/newline separator
         let prefix = argType.promptPrefix
         let separator = (argType == .bridge) ? "\n\n" : " "
         let insertText = separator + prefix
@@ -833,7 +786,6 @@ class EditorEngine: ObservableObject {
         )
         cursorPosition = insertPos + insertText.count
         
-        // Start tracking as a semantic change
         pendingChangeTracker.startChange(
             type: .added,
             unitType: .sentence,
@@ -842,7 +794,6 @@ class EditorEngine: ObservableObject {
             context: argType.context
         )
         
-        // Enter insert mode (sentence context for auto-exit on period)
         mode = .insert(.sentence)
         insertContext = .sentence
         pendingVerb = nil
@@ -852,11 +803,9 @@ class EditorEngine: ObservableObject {
     
     // MARK: - Annotation Navigation
     
-    /// Navigate editor cursor to a specific position (used for annotation jump-to)
     func navigateToPosition(_ position: Int) {
         let text = document.currentContent
         cursorPosition = TextAnalyzer.safePosition(position, in: text)
-        // Highlight the sentence at that position briefly
         if let sentence = analyzer.sentenceAt(cursorPosition, in: text) {
             highlightRange = sentence.range
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
@@ -897,16 +846,40 @@ class EditorEngine: ObservableObject {
         flashCursor()
     }
     
+    // FIX 1: Paragraph navigation now uses the NLP-based paragraph list
+    // instead of raw \n\n searching. This correctly handles edge cases where
+    // the cursor sits at a paragraph boundary.
     private func navigateParagraph(forward: Bool) {
-        let nsText = document.currentContent as NSString
+        let text = document.currentContent
+        let paragraphs = analyzer.paragraphs(in: text)
+        guard !paragraphs.isEmpty else { return }
+        
         if forward {
-            let range = NSRange(location: cursorPosition, length: nsText.length - cursorPosition)
-            let result = nsText.range(of: "\n\n", options: [], range: range)
-            cursorPosition = result.location != NSNotFound ? result.location + result.length : nsText.length
+            // Find the first paragraph whose start is strictly after the cursor
+            if let next = paragraphs.first(where: { $0.range.location > cursorPosition }) {
+                cursorPosition = next.range.location
+            } else {
+                // Already in/past the last paragraph — go to end
+                cursorPosition = (text as NSString).length
+            }
         } else {
-            let range = NSRange(location: 0, length: cursorPosition)
-            let result = nsText.range(of: "\n\n", options: .backwards, range: range)
-            cursorPosition = result.location != NSNotFound ? result.location + result.length : 0
+            // Find the current paragraph (the one containing the cursor)
+            let currentParaIndex = paragraphs.lastIndex(where: { $0.range.location <= cursorPosition })
+            
+            if let idx = currentParaIndex {
+                if paragraphs[idx].range.location < cursorPosition {
+                    // Cursor is in the middle of this paragraph — jump to its start
+                    cursorPosition = paragraphs[idx].range.location
+                } else if idx > 0 {
+                    // Cursor is at the start of this paragraph — jump to previous
+                    cursorPosition = paragraphs[idx - 1].range.location
+                } else {
+                    // Already at the first paragraph — go to 0
+                    cursorPosition = 0
+                }
+            } else {
+                cursorPosition = 0
+            }
         }
         flashCursor()
     }

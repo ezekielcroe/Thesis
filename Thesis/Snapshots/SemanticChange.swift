@@ -27,15 +27,28 @@ enum SemanticChangeType: String, Codable, Equatable, CaseIterable {
     case added
     case deleted
     case replaced
-    case refined
     case moved
+    
+    // Backward compatibility: "refined" in persisted data decodes as .replaced
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        if raw == "refined" {
+            self = .replaced
+        } else if let value = SemanticChangeType(rawValue: raw) {
+            self = value
+        } else {
+            throw DecodingError.dataCorruptedError(
+                in: try decoder.singleValueContainer(),
+                debugDescription: "Unknown SemanticChangeType: \(raw)"
+            )
+        }
+    }
     
     var displayName: String {
         switch self {
         case .added:    return "Added"
         case .deleted:  return "Deleted"
         case .replaced: return "Replaced"
-        case .refined:  return "Refined"
         case .moved:    return "Moved"
         }
     }
@@ -45,7 +58,6 @@ enum SemanticChangeType: String, Codable, Equatable, CaseIterable {
         case .added:    return "plus.circle.fill"
         case .deleted:  return "minus.circle.fill"
         case .replaced: return "arrow.triangle.2.circlepath"
-        case .refined:  return "sparkles"
         case .moved:    return "arrow.up.arrow.down"
         }
     }
@@ -55,7 +67,6 @@ enum SemanticChangeType: String, Codable, Equatable, CaseIterable {
         case .added:    return "green"
         case .deleted:  return "red"
         case .replaced: return "orange"
-        case .refined:  return "blue"
         case .moved:    return "purple"
         }
     }
@@ -98,7 +109,7 @@ struct SemanticChange: Identifiable, Codable, Equatable {
             return afterText.map { "\"\(String($0.prefix(60)))\($0.count > 60 ? "…" : "")\"" } ?? ""
         case .deleted:
             return beforeText.map { "\"\(String($0.prefix(60)))\($0.count > 60 ? "…" : "")\"" } ?? ""
-        case .replaced, .refined:
+        case .replaced:
             let before = beforeText.map { String($0.prefix(30)) } ?? ""
             let after = afterText.map { String($0.prefix(30)) } ?? ""
             return "\"\(before)\" → \"\(after)\""
@@ -117,7 +128,7 @@ struct SemanticChange: Identifiable, Codable, Equatable {
     }
 }
 
-// MARK: - Pending Change Tracker (improved: tracks insert start position)
+// MARK: - Pending Change Tracker
 
 class PendingChangeTracker {
     private(set) var change: SemanticChange?
@@ -142,14 +153,11 @@ class PendingChangeTracker {
         insertStartPosition = position
     }
     
-    /// Complete the pending change by extracting the actual inserted text
-    /// from the document content using the tracked start position and current cursor.
     func completeChange(currentContent: String, cursorPosition: Int) -> SemanticChange? {
         guard let current = change else { return nil }
         let startPos = insertStartPosition ?? current.position
         let nsContent = currentContent as NSString
         
-        // Extract the actual text that was inserted
         let safeStart = max(0, min(startPos, nsContent.length))
         let safeEnd = max(safeStart, min(cursorPosition, nsContent.length))
         let insertedLength = safeEnd - safeStart
@@ -160,8 +168,6 @@ class PendingChangeTracker {
             afterText = nsContent.substring(with: range)
         }
         
-        // For replace/refine, the "after" text is the new content
-        // For add, the "after" text is what was typed
         let completed = SemanticChange(
             type: current.type,
             unitType: current.unitType,
@@ -177,7 +183,6 @@ class PendingChangeTracker {
         return completed
     }
     
-    /// Legacy completion (when we already know the after text)
     func completeChange(afterText: String) -> SemanticChange? {
         guard let current = change else { return nil }
         let completed = SemanticChange(
@@ -205,34 +210,24 @@ class PendingChangeTracker {
 struct ChangeSummary {
     let changes: [SemanticChange]
     
-    /// Generate human-readable summary like "2 refined, 1 added, 1 deleted"
     var text: String {
         var counts: [SemanticChangeType: Int] = [:]
-        
         for change in changes {
             counts[change.type, default: 0] += 1
         }
-        
         let parts = counts.sorted { $0.key.displayName < $1.key.displayName }
             .map { "\($0.value) \($0.key.displayName.lowercased())" }
-        
         return parts.isEmpty ? "No changes" : parts.joined(separator: ", ")
     }
     
-    /// Breakdown by change type
     var breakdown: [(type: SemanticChangeType, count: Int)] {
         var counts: [SemanticChangeType: Int] = [:]
-        
         for change in changes {
             counts[change.type, default: 0] += 1
         }
-        
         return counts.map { (type: $0.key, count: $0.value) }
             .sorted { $0.type.displayName < $1.type.displayName }
     }
     
-    /// Total number of changes
-    var totalCount: Int {
-        return changes.count
-    }
+    var totalCount: Int { changes.count }
 }

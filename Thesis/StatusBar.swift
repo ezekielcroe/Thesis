@@ -101,7 +101,6 @@ struct StatusBar: View {
                 let label = change.semanticType?.displayName.uppercased() ?? "ADDED"
                 let color: Color = {
                     switch change.semanticType {
-                    case .refined:  return .blue
                     case .replaced: return .orange
                     default:        return .green
                     }
@@ -173,7 +172,7 @@ struct VerbHelpOverlay: View {
                     Text(item.key)
                         .font(.system(size: 12, weight: .bold, design: .monospaced))
                         .frame(width: 16, alignment: .center)
-                        .foregroundColor(verb == .delete ? .red : verb == .refine ? .blue : .primary)
+                        .foregroundColor(verb == .delete ? .red : verb == .replace ? .orange : verb == .cite ? .teal : .primary)
                     Text(item.description)
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)

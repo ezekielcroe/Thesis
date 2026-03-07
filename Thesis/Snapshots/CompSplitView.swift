@@ -1,5 +1,5 @@
 // CompSplitView.swift — Thesis
-// Side-by-side diff renderer with synchronized scrolling and strikethroughs
+// Side-by-side diff renderer with synchronized scrolling, alignment padding, and strikethroughs
 
 import SwiftUI
 import AppKit
@@ -13,6 +13,9 @@ struct CompSplitView: NSViewRepresentable {
         let splitView = NSSplitView()
         splitView.isVertical = true
         splitView.dividerStyle = .thin
+        
+        // 1. ADD THIS: Set the coordinator as the delegate
+        splitView.delegate = context.coordinator
         
         // Left Pane (Old Draft)
         let leftScroll = NSScrollView()
@@ -35,7 +38,7 @@ struct CompSplitView: NSViewRepresentable {
         splitView.addArrangedSubview(leftScroll)
         splitView.addArrangedSubview(rightScroll)
         
-        // Synchronize Scrolling (with guard to prevent feedback loop)
+        // Synchronize Scrolling
         let coordinator = context.coordinator
         leftScroll.contentView.postsBoundsChangedNotifications = true
         rightScroll.contentView.postsBoundsChangedNotifications = true
@@ -69,6 +72,15 @@ struct CompSplitView: NSViewRepresentable {
         coordinator.leftText = leftText
         coordinator.rightText = rightText
         
+        DispatchQueue.main.async {
+            rightText.window?.makeFirstResponder(rightText)
+            
+            // 2. ADD THIS: Force the divider to the exact middle of the available space
+            if splitView.bounds.width > 0 {
+                splitView.setPosition(splitView.bounds.width / 2, ofDividerAt: 0)
+            }
+        }
+        
         return splitView
     }
     
@@ -76,36 +88,52 @@ struct CompSplitView: NSViewRepresentable {
         guard let leftText = context.coordinator.leftText,
               let rightText = context.coordinator.rightText else { return }
         
-        // 1. Build the Rich Text
         let layout = DiffRenderer.build(from: diffChanges)
         
-        // Only update text if it changed to prevent scrolling resets
-        if leftText.string != layout.leftString.string {
-            leftText.textStorage?.setAttributedString(layout.leftString)
-            rightText.textStorage?.setAttributedString(layout.rightString)
-        }
+        // Always update when diff changes arrive
+        leftText.textStorage?.setAttributedString(layout.leftString)
+        rightText.textStorage?.setAttributedString(layout.rightString)
         
-        // 2. Scroll to current change if 'n' or 'p' was pressed
+        // Scroll to current change
         guard diffChanges.indices.contains(currentIndex) else { return }
         let currentChangeId = diffChanges[currentIndex].id
         
         if let ranges = layout.changeRanges[currentChangeId] {
-            // Scroll right text to view, and flash the native AppKit find indicator
             rightText.scrollRangeToVisible(ranges.right)
             
-            // Debounce the find indicator so it doesn't spam
             DispatchQueue.main.async {
-                rightText.showFindIndicator(for: ranges.right)
-                leftText.showFindIndicator(for: ranges.left)
+                if ranges.right.length > 0 {
+                    rightText.showFindIndicator(for: ranges.right)
+                }
+                if ranges.left.length > 0 {
+                    leftText.showFindIndicator(for: ranges.left)
+                }
             }
         }
     }
     
     func makeCoordinator() -> Coordinator { Coordinator() }
-    class Coordinator {
+        
+    // 3. REPLACE your Coordinator with this updated version
+    class Coordinator: NSObject, NSSplitViewDelegate {
         weak var leftText: CompNSTextView?
         weak var rightText: CompNSTextView?
-        var isSyncing: Bool = false  // Prevents scroll observer feedback loop
+        var isSyncing: Bool = false
+        
+        // Prevent either pane from collapsing to 0 width
+        func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
+            return false
+        }
+        
+        // Optional: Prevent the user from dragging the divider too far left
+        func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+            return 150
+        }
+        
+        // Optional: Prevent the user from dragging the divider too far right
+        func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+            return splitView.bounds.width - 150
+        }
     }
 }
 
@@ -121,7 +149,6 @@ class CompNSTextView: NSTextView {
         onKeyPress?(chars, event.modifierFlags)
     }
     
-    // Prevent mouse clicks from messing with the selection state while in diff mode
     override func mouseDown(with event: NSEvent) {}
 }
 
@@ -144,6 +171,11 @@ class DiffRenderer {
             .font: font,
             .foregroundColor: NSColor.textColor
         ]
+        let placeholderAttrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.tertiaryLabelColor,
+            .backgroundColor: NSColor.quaternaryLabelColor
+        ]
         
         for change in diffs {
             let leftStart = leftStr.length
@@ -151,45 +183,78 @@ class DiffRenderer {
             
             switch change.type {
             case .unchanged:
-                leftStr.append(NSAttributedString(string: change.text + " ", attributes: defaultAttrs))
-                rightStr.append(NSAttributedString(string: change.text + " ", attributes: defaultAttrs))
+                let text = change.text + "\n"
+                leftStr.append(NSAttributedString(string: text, attributes: defaultAttrs))
+                rightStr.append(NSAttributedString(string: text, attributes: defaultAttrs))
                 
             case .deletion:
                 var attrs = defaultAttrs
                 attrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
                 attrs[.strikethroughColor] = NSColor.systemRed
                 attrs[.backgroundColor] = NSColor.systemRed.withAlphaComponent(0.15)
-                leftStr.append(NSAttributedString(string: change.text + " ", attributes: attrs))
-                // Right side gets nothing; the text is gone.
+                let text = change.text + "\n"
+                leftStr.append(NSAttributedString(string: text, attributes: attrs))
+                // FIX: Add placeholder on right side so lines stay aligned
+                let placeholder = String(repeating: " ", count: min(change.text.count, 40)) + " [deleted]\n"
+                rightStr.append(NSAttributedString(string: placeholder, attributes: placeholderAttrs))
                 
             case .addition:
-                // Handle Left Side (The "Old" version of the replaced text, if any)
-                if let oldText = change.oldText {
-                    var lAttrs = defaultAttrs
-                    lAttrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
-                    lAttrs[.strikethroughColor] = NSColor.systemRed
-                    lAttrs[.backgroundColor] = NSColor.systemRed.withAlphaComponent(0.15)
-                    leftStr.append(NSAttributedString(string: oldText + " ", attributes: lAttrs))
-                }
-                
-                // Handle Right Side (The "New" version)
-                var rAttrs = defaultAttrs
-                let bgColor: NSColor = {
-                    switch change.semanticType {
-                    case .refined:  return .systemBlue
-                    case .replaced: return .systemOrange
-                    default:        return .systemGreen
+                if let wordDiffs = change.wordDiffs, !wordDiffs.isEmpty {
+                    // 1. Build Left Side (Old Sentence granular diff)
+                    let leftWords = wordDiffs.filter { $0.type == .unchanged || $0.type == .deletion }
+                    for word in leftWords {
+                        var lAttrs = defaultAttrs
+                        if word.type == .deletion {
+                            lAttrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+                            lAttrs[.strikethroughColor] = NSColor.systemRed
+                            lAttrs[.backgroundColor] = NSColor.systemRed.withAlphaComponent(0.15)
+                        }
+                        leftStr.append(NSAttributedString(string: word.text + " ", attributes: lAttrs))
                     }
-                }()
-                rAttrs[.backgroundColor] = bgColor.withAlphaComponent(0.2)
-                rightStr.append(NSAttributedString(string: change.text + " ", attributes: rAttrs))
+                    
+                    // 2. Build Right Side (New Sentence granular diff)
+                    let rightWords = wordDiffs.filter { $0.type == .unchanged || $0.type == .addition }
+                    for word in rightWords {
+                        var rAttrs = defaultAttrs
+                        if word.type == .addition {
+                            let bgColor: NSColor = {
+                                switch change.semanticType {
+                                case .replaced: return .systemOrange
+                                default:        return .systemGreen
+                                }
+                            }()
+                            rAttrs[.backgroundColor] = bgColor.withAlphaComponent(0.2)
+                        }
+                        rightStr.append(NSAttributedString(string: word.text + " ", attributes: rAttrs))
+                    }
+                } else {
+                    // Fallback: Handle Left Side (The "Old" version of the replaced text, if any)
+                    if let oldText = change.oldText {
+                        var lAttrs = defaultAttrs
+                        lAttrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+                        lAttrs[.strikethroughColor] = NSColor.systemRed
+                        lAttrs[.backgroundColor] = NSColor.systemRed.withAlphaComponent(0.15)
+                        leftStr.append(NSAttributedString(string: oldText + " ", attributes: lAttrs))
+                    }
+                    
+                    // Fallback: Handle Right Side (The "New" version)
+                    var rAttrs = defaultAttrs
+                    let bgColor: NSColor = {
+                        switch change.semanticType {
+                        case .replaced: return .systemOrange
+                        default:        return .systemGreen
+                        }
+                    }()
+                    rAttrs[.backgroundColor] = bgColor.withAlphaComponent(0.2)
+                    rightStr.append(NSAttributedString(string: change.text + " ", attributes: rAttrs))
+                }
                 
             case .moved:
                 var attrs = defaultAttrs
                 attrs[.backgroundColor] = NSColor.systemPurple.withAlphaComponent(0.2)
-                // Left side gets normal text, right gets purple to indicate it arrived here
-                leftStr.append(NSAttributedString(string: change.text + " ", attributes: defaultAttrs))
-                rightStr.append(NSAttributedString(string: change.text + " ", attributes: attrs))
+                let text = change.text + "\n"
+                leftStr.append(NSAttributedString(string: text, attributes: defaultAttrs))
+                rightStr.append(NSAttributedString(string: text, attributes: attrs))
             }
             
             let leftEnd = leftStr.length

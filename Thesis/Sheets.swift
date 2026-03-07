@@ -1,5 +1,5 @@
 // Sheets.swift — Thesis
-// Modal sheets: FirstDraft, SaveDraft, Annotation (with categories), Branch, Merge
+// Modal sheets: FirstDraft, SaveDraft, Annotation (simplified), Branch, Merge
 
 import SwiftUI
 
@@ -67,13 +67,12 @@ struct SaveDraftSheet: View {
     }
 }
 
-// MARK: - Annotation Sheet (with categories)
+// MARK: - Annotation Sheet (simplified — notes only)
 
 struct AnnotationSheet: View {
     let anchorText: String
-    let onSave: (String, AnnotationCategory) -> Void
+    let onSave: (String) -> Void
     @State private var noteText: String = ""
-    @State private var category: AnnotationCategory = .note
     @Environment(\.dismiss) var dismiss
     
     var body: some View {
@@ -88,26 +87,98 @@ struct AnnotationSheet: View {
                     .background(Color.purple.opacity(0.05)).cornerRadius(6)
             }
             
-            // Category picker
-            Picker("Category", selection: $category) {
-                ForEach(AnnotationCategory.allCases, id: \.self) { cat in
-                    Label(cat.displayName, systemImage: cat.icon).tag(cat)
-                }
-            }
-            .pickerStyle(.segmented)
-            
             TextField("Your note…", text: $noteText, axis: .vertical)
                 .textFieldStyle(.roundedBorder).lineLimit(3...6)
-                .onSubmit { if !noteText.isEmpty { dismiss(); onSave(noteText, category) } }
+                .onSubmit { if !noteText.isEmpty { dismiss(); onSave(noteText) } }
             
             HStack(spacing: 12) {
                 Button("Cancel") { dismiss() }.keyboardShortcut(.escape)
-                Button("Save Note") { dismiss(); onSave(noteText, category) }
+                Button("Save Note") { dismiss(); onSave(noteText) }
                     .disabled(noteText.isEmpty)
                     .keyboardShortcut(.return).buttonStyle(.borderedProminent)
             }
         }
         .padding(24).frame(width: 440)
+    }
+}
+
+// MARK: - Citation Sheet
+
+struct CitationSheet: View {
+    let anchorText: String
+    let existingKeys: Set<String>
+    let onSave: (String, String) -> Void
+    @State private var key: String = ""
+    @State private var source: String = ""
+    @FocusState private var focusedField: Field?
+    @Environment(\.dismiss) var dismiss
+    enum Field { case key, source }
+    
+    private var keyConflict: Bool {
+        !key.isEmpty && existingKeys.contains(key)
+    }
+    
+    private var sanitizedKey: String {
+        // Strip brackets and whitespace so users can't create nested [[key]] etc.
+        key.replacingOccurrences(of: "[", with: "")
+           .replacingOccurrences(of: "]", with: "")
+           .trimmingCharacters(in: .whitespaces)
+    }
+    
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "quote.opening").font(.system(size: 28)).foregroundColor(.teal)
+            Text("Add Citation").font(.headline)
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Citing:").font(.system(size: 11, weight: .medium)).foregroundColor(.secondary)
+                Text("\"\(String(anchorText.prefix(100)))\(anchorText.count > 100 ? "…" : "")\"")
+                    .font(.system(size: 12)).padding(8)
+                    .background(Color.teal.opacity(0.05)).cornerRadius(6)
+            }
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Citation key").font(.system(size: 11, weight: .medium)).foregroundColor(.secondary)
+                TextField("e.g. Miller2024", text: $key)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focusedField, equals: .key)
+                    .onSubmit { focusedField = .source }
+                
+                if !key.isEmpty {
+                    HStack(spacing: 4) {
+                        Text("Will appear as").font(.system(size: 10)).foregroundColor(.secondary)
+                        Text("[\(sanitizedKey)]")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundColor(.teal)
+                    }
+                }
+                if keyConflict {
+                    Text("This key is already in use")
+                        .font(.system(size: 10, weight: .medium)).foregroundColor(.orange)
+                }
+            }
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Source (optional)").font(.system(size: 11, weight: .medium)).foregroundColor(.secondary)
+                TextField("e.g. Miller, J. (2024). On Thought. p.42", text: $source, axis: .vertical)
+                    .textFieldStyle(.roundedBorder).lineLimit(2...4)
+                    .focused($focusedField, equals: .source)
+                    .onSubmit {
+                        if !sanitizedKey.isEmpty && !keyConflict {
+                            dismiss(); onSave(sanitizedKey, source)
+                        }
+                    }
+            }
+            
+            HStack(spacing: 12) {
+                Button("Cancel") { dismiss() }.keyboardShortcut(.escape)
+                Button("Insert Citation") { dismiss(); onSave(sanitizedKey, source) }
+                    .disabled(sanitizedKey.isEmpty || keyConflict)
+                    .keyboardShortcut(.return).buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(24).frame(width: 460)
+        .onAppear { focusedField = .key }
     }
 }
 
@@ -129,7 +200,6 @@ struct BranchSheet: View {
             Image(systemName: "arrow.triangle.branch").font(.system(size: 28)).foregroundColor(.purple)
             Text("Branches").font(.headline)
             
-            // Existing branches
             ScrollView {
                 VStack(spacing: 4) {
                     ForEach(document.branches) { branch in
@@ -162,7 +232,6 @@ struct BranchSheet: View {
             
             Divider()
             
-            // Create new branch
             if showingCreate {
                 VStack(spacing: 8) {
                     TextField("Branch name", text: $newBranchName).textFieldStyle(.roundedBorder)
@@ -194,45 +263,33 @@ struct BranchSheet: View {
 struct MergeSheet: View {
     @ObservedObject var document: Document
     let onMerge: (String) -> Void
-    
-    @State private var selectedBranch: String = ""
     @Environment(\.dismiss) var dismiss
-    
-    var mergeCandidates: [Branch] {
-        document.branches.filter { $0.name != document.activeBranchName }
-    }
     
     var body: some View {
         VStack(spacing: 16) {
-            Image(systemName: "arrow.triangle.merge").font(.system(size: 28)).foregroundColor(.blue)
+            Image(systemName: "arrow.triangle.merge").font(.system(size: 28)).foregroundColor(.purple)
             Text("Merge Branch").font(.headline)
-            Text("Merge another branch into '\(document.activeBranchName)'")
-                .font(.subheadline).foregroundColor(.secondary)
             
-            if mergeCandidates.isEmpty {
-                Text("No other branches to merge.").foregroundColor(.secondary).padding()
+            let otherBranches = document.branches.filter { $0.name != document.activeBranchName }
+            if otherBranches.isEmpty {
+                Text("No other branches to merge.").foregroundColor(.secondary)
             } else {
-                Picker("Source branch", selection: $selectedBranch) {
-                    Text("Select…").tag("")
-                    ForEach(mergeCandidates) { branch in
-                        Text(branch.name).tag(branch.name)
+                ForEach(otherBranches) { branch in
+                    Button("Merge '\(branch.name)' into '\(document.activeBranchName)'") {
+                        dismiss()
+                        onMerge(branch.name)
                     }
+                    .buttonStyle(.borderedProminent)
                 }
-                .onAppear { selectedBranch = mergeCandidates.first?.name ?? "" }
             }
             
-            HStack(spacing: 12) {
-                Button("Cancel") { dismiss() }.keyboardShortcut(.escape)
-                Button("Merge") { dismiss(); onMerge(selectedBranch) }
-                    .disabled(selectedBranch.isEmpty)
-                    .keyboardShortcut(.return).buttonStyle(.borderedProminent)
-            }
+            Button("Cancel") { dismiss() }.keyboardShortcut(.escape)
         }
-        .padding(24).frame(width: 400)
+        .padding(24).frame(width: 420)
     }
 }
 
-// MARK: - Help Sheet
+// MARK: - Help Sheet (updated verbs)
 
 struct HelpSheet: View {
     @Environment(\.dismiss) var dismiss
@@ -264,13 +321,13 @@ struct HelpSheet: View {
                     ])
                     helpSection("Editing (verb + object)", items: [
                         ("d + s/c/p/w", "Delete sentence/clause/paragraph/word"),
-                        ("c + s/c/p/w", "Change (replace) sentence/clause/paragraph/word"),
-                        ("r + s/c/p/w", "Refine (improve wording) sentence/clause/paragraph/word"),
+                        ("r + s/c/p/w", "Replace sentence/clause/paragraph/word"),
+                        ("c + s/c/p/w", "Cite (annotate citation) sentence/clause/paragraph/word"),
                         ("y + s/c/p/w", "Yank (copy) to register"),
                         ("p", "Paste from register"),
                         ("x + s/p", "Move sentence/paragraph (then j/k, Enter)"),
                         ("m + s/c/p/w", "Annotate (add note)"),
-                        ("D / C / R", "Delete/Change/Refine to end of sentence"),
+                        ("D / R", "Delete / Replace to end of sentence"),
                         (".", "Repeat last command"),
                         ("u", "Undo"),
                         ("Ctrl+r", "Redo"),
@@ -284,12 +341,11 @@ struct HelpSheet: View {
                     ])
                     helpSection("Commands", items: [
                         (":save / :commit", "Save draft with message"),
-                        (":comp / :diff", "Compare with last draft"),
+                        (":diff / :comp", "Compare with last draft"),
                         (":branch", "Manage branches"),
                         (":merge", "Merge a branch"),
                         (":log", "View commit history"),
                         (":help", "Show this help"),
-                        (":ie :ic :ir :ab :at", "Argument commands (long form)"),
                     ])
                 }
             }
@@ -322,7 +378,7 @@ struct HelpSheet: View {
     }
 }
 
-// MARK: - Log Sheet (Inline History)
+// MARK: - Log Sheet
 
 struct LogSheet: View {
     @ObservedObject var document: Document

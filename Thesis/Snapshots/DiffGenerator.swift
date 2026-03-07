@@ -13,13 +13,13 @@ struct DiffChange: Identifiable {
     let text: String
     let displayRange: NSRange?
     let oldText: String?
-    let wordDiffs: [WordDiff]?    // Word-level sub-diff for modified sentences
+    let wordDiffs: [WordDiff]?
     
     enum ChangeType {
         case addition
         case deletion
         case unchanged
-        case moved                // Sentence exists in both but different position
+        case moved
     }
     
     init(
@@ -41,7 +41,7 @@ struct DiffChange: Identifiable {
     }
 }
 
-// MARK: - Word-Level Diff (for showing changes within a modified sentence)
+// MARK: - Word-Level Diff
 
 struct WordDiff: Identifiable {
     let id = UUID()
@@ -60,7 +60,6 @@ struct EditorDiffInfo {
 struct DiffStatistics {
     let added: Int
     let deleted: Int
-    let refined: Int
     let replaced: Int
     let moved: Int
     let totalChanges: Int
@@ -69,7 +68,6 @@ struct DiffStatistics {
         var parts: [String] = []
         if added > 0    { parts.append("+\(added) added") }
         if deleted > 0  { parts.append("-\(deleted) deleted") }
-        if refined > 0  { parts.append("~\(refined) refined") }
         if replaced > 0 { parts.append("⇄\(replaced) replaced") }
         if moved > 0    { parts.append("↕\(moved) moved") }
         return parts.isEmpty ? "No changes" : parts.joined(separator: ", ")
@@ -94,7 +92,6 @@ class DiffGenerator {
         let oldNorm = oldSentences.map { normalize($0.text) }
         let newNorm = newSentences.map { normalize($0.text) }
         
-        // Build semantic change lookup
         var semanticMap: [String: SemanticChange] = [:]
         for change in changes {
             if let afterText = change.afterText {
@@ -102,14 +99,12 @@ class DiffGenerator {
             }
         }
         
-        // LCS to find longest common subsequence of sentences (index-based)
+        // Grab the precise mapping map alongside the sets
         let lcs = longestCommonSubsequence(oldNorm, newNorm)
         
-        // Build sets for quick lookup
         let oldNormSet = NSCountedSet(array: oldNorm)
         let newNormSet = NSCountedSet(array: newNorm)
         
-        // Detect moves: sentences in old that exist in new but are NOT in LCS alignment
         var movedSentences = Set<String>()
         for (index, sentence) in oldNorm.enumerated() {
             if newNormSet.contains(sentence) && !lcs.oldIndices.contains(index) {
@@ -118,14 +113,13 @@ class DiffGenerator {
         }
         
         var diffChanges: [DiffChange] = []
-        var currentLocation = 0
         
-        // Process new sentences
         for (i, newSentence) in newSentences.enumerated() {
             let norm = newNorm[i]
-            let range = NSRange(location: currentLocation, length: newSentence.text.count)
+            let range = newSentence.range
             
-            if lcs.newIndices.contains(i) || (oldNormSet.contains(norm) && !movedSentences.contains(norm)) {
+            // FIX 1: Removed the fallback. If it's not strictly unchanged or moved, it's an addition.
+            if lcs.newIndices.contains(i) {
                 diffChanges.append(DiffChange(type: .unchanged, range: range, text: newSentence.text))
             } else if movedSentences.contains(norm) {
                 diffChanges.append(DiffChange(
@@ -137,7 +131,6 @@ class DiffGenerator {
                 let semanticType = changeRecord?.type ?? .added
                 let previousVersion = changeRecord?.beforeText
                 
-                // Generate word-level sub-diff if we have the old version
                 var wordDiffs: [WordDiff]? = nil
                 if let oldVersion = previousVersion, !oldVersion.isEmpty {
                     wordDiffs = generateWordDiff(from: oldVersion, to: newSentence.text)
@@ -149,22 +142,19 @@ class DiffGenerator {
                     wordDiffs: wordDiffs
                 ))
             }
-            currentLocation += newSentence.text.count
         }
         
-        // Find deletions (sentences in old but not in new)
         for (index, oldSentence) in oldSentences.enumerated() {
             let norm = oldNorm[index]
             guard !newNormSet.contains(norm) else { continue }
             
-            // Find display anchor position
+            // FIX 2: Use exact LCS mapping to find the anchor position for deletions
             var displayLocation = 0
             for i in (0..<index).reversed() {
-                if newNormSet.contains(oldNorm[i]) {
-                    if let match = newSentences.first(where: { normalize($0.text) == oldNorm[i] }) {
-                        displayLocation = match.range.location + match.range.length
-                        break
-                    }
+                if let newIndex = lcs.oldToNewMap[i] {
+                    let match = newSentences[newIndex]
+                    displayLocation = match.range.location + match.range.length
+                    break
                 }
             }
             
@@ -177,7 +167,6 @@ class DiffGenerator {
             ))
         }
         
-        // Sort by display position
         diffChanges.sort { lhs, rhs in
             let lhsLoc = lhs.type == .deletion ? (lhs.displayRange?.location ?? 0) : lhs.range.location
             let rhsLoc = rhs.type == .deletion ? (rhs.displayRange?.location ?? 0) : rhs.range.location
@@ -193,11 +182,9 @@ class DiffGenerator {
     
     // MARK: - LCS (Longest Common Subsequence)
     
-    /// Returns the indices in each array that form the LCS alignment.
-    /// Using index sets (not string sets) so duplicate sentences are tracked by position.
-    private static func longestCommonSubsequence(_ a: [String], _ b: [String]) -> (oldIndices: Set<Int>, newIndices: Set<Int>) {
+    private static func longestCommonSubsequence(_ a: [String], _ b: [String]) -> (oldIndices: Set<Int>, newIndices: Set<Int>, oldToNewMap: [Int: Int]) {
         let m = a.count, n = b.count
-        guard m > 0 && n > 0 else { return ([], []) }
+        guard m > 0 && n > 0 else { return ([], [], [:]) }
         
         var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
         for i in 1...m {
@@ -212,11 +199,14 @@ class DiffGenerator {
         
         var oldIndices = Set<Int>()
         var newIndices = Set<Int>()
+        var oldToNewMap = [Int: Int]()
+        
         var i = m, j = n
         while i > 0 && j > 0 {
             if a[i-1] == b[j-1] {
                 oldIndices.insert(i-1)
                 newIndices.insert(j-1)
+                oldToNewMap[i-1] = j-1
                 i -= 1; j -= 1
             } else if dp[i-1][j] > dp[i][j-1] {
                 i -= 1
@@ -224,7 +214,7 @@ class DiffGenerator {
                 j -= 1
             }
         }
-        return (oldIndices, newIndices)
+        return (oldIndices, newIndices, oldToNewMap)
     }
     
     // MARK: - Word-Level Sub-Diff
@@ -236,7 +226,6 @@ class DiffGenerator {
         let m = oldWords.count, n = newWords.count
         guard m > 0 || n > 0 else { return [] }
         
-        // Simple LCS for words
         var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
         for i in 1...max(1, m) {
             for j in 1...max(1, n) {
@@ -248,7 +237,6 @@ class DiffGenerator {
             }
         }
         
-        // Backtrack
         var i = m, j = n
         var stack: [WordDiff] = []
         
@@ -298,17 +286,16 @@ class DiffGenerator {
     }
     
     static func statistics(for diff: [DiffChange]) -> DiffStatistics {
-        var added = 0, deleted = 0, refined = 0, replaced = 0, moved = 0
+        var added = 0, deleted = 0, replaced = 0, moved = 0
         for change in diff {
             switch change.type {
             case .addition:
                 switch change.semanticType {
-                case .refined:  refined += 1
                 case .replaced: replaced += 1
                 default:        added += 1
                 }
             case .deletion:
-                if change.semanticType != .refined && change.semanticType != .replaced {
+                if change.semanticType != .replaced {
                     deleted += 1
                 }
             case .moved: moved += 1
@@ -316,15 +303,14 @@ class DiffGenerator {
             }
         }
         return DiffStatistics(
-            added: added, deleted: deleted, refined: refined,
+            added: added, deleted: deleted,
             replaced: replaced, moved: moved,
-            totalChanges: added + deleted + refined + replaced + moved
+            totalChanges: added + deleted + replaced + moved
         )
     }
     
-    // MARK: - Three-Way Merge (for branch merging)
-    
-    /// Generate a three-way merge from common ancestor, ours, and theirs
+    // MARK: - Three-Way Merge
+
     static func threeWayMerge(
         ancestor: String,
         ours: String,
@@ -343,25 +329,20 @@ class DiffGenerator {
         var merged = ""
         var conflicts: [MergeConflict] = []
         
-        // Walk through our sentences
         for sentence in ourSentences {
             let norm = normalize(sentence.text)
             
             if ancestorNorm.contains(norm) && theirNorm.contains(norm) {
-                // Unchanged in both — keep
                 merged += sentence.text
             } else if ancestorNorm.contains(norm) && !theirNorm.contains(norm) {
-                // Deleted by theirs — omit (theirs wins for deletions)
+                // Deleted by theirs — omit
             } else if !ancestorNorm.contains(norm) {
-                // Added by us — keep
                 merged += sentence.text
             } else {
-                // Modified — potential conflict
                 merged += sentence.text
             }
         }
         
-        // Add sentences that theirs added (not in ancestor, not in ours)
         for sentence in theirSentences {
             let norm = normalize(sentence.text)
             if !ancestorNorm.contains(norm) && !Set(ourNorm).contains(norm) {
@@ -369,14 +350,12 @@ class DiffGenerator {
             }
         }
         
-        // Detect conflicts: sentences modified in both branches differently
         for ancestorSentence in ancestorSentences {
             let norm = normalize(ancestorSentence.text)
             let inOurs = Set(ourNorm).contains(norm)
             let inTheirs = theirNorm.contains(norm)
             
             if !inOurs && !inTheirs {
-                // Both branches modified/deleted this sentence — conflict
                 conflicts.append(MergeConflict(
                     position: ancestorSentence.range.location,
                     ourText: "Modified in current branch",

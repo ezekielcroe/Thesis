@@ -1,5 +1,5 @@
 // Document.swift — Thesis
-// Core document model: content, branches, version history, annotations
+// Core document model: content, branches, version history, annotations, citations
 
 import Foundation
 import Combine
@@ -14,15 +14,15 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
     @Published var workingDraft: WorkingDraft?
     @Published var lastModified: Date
     @Published var annotations: [Annotation]
+    @Published var citations: [Citation]
     @Published var sessionChanges: [SemanticChange]
     @Published var yankRegister: String?
     
-    // Debounce timer for working draft auto-save
     private var workingDraftTimer: Timer?
     
     enum CodingKeys: String, CodingKey {
         case id, title, currentContent, drafts, branches, activeBranchName
-        case workingDraft, lastModified, annotations, sessionChanges
+        case workingDraft, lastModified, annotations, citations, sessionChanges
     }
     
     init(title: String = "Untitled Thought") {
@@ -35,6 +35,7 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         self.workingDraft = nil
         self.lastModified = Date()
         self.annotations = []
+        self.citations = []
         self.sessionChanges = []
         self.yankRegister = nil
     }
@@ -50,6 +51,7 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         workingDraft = try container.decodeIfPresent(WorkingDraft.self, forKey: .workingDraft)
         lastModified = try container.decode(Date.self, forKey: .lastModified)
         annotations = try container.decodeIfPresent([Annotation].self, forKey: .annotations) ?? []
+        citations = try container.decodeIfPresent([Citation].self, forKey: .citations) ?? []
         sessionChanges = try container.decodeIfPresent([SemanticChange].self, forKey: .sessionChanges) ?? []
         yankRegister = nil
     }
@@ -65,6 +67,7 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         try container.encode(workingDraft, forKey: .workingDraft)
         try container.encode(lastModified, forKey: .lastModified)
         try container.encode(annotations, forKey: .annotations)
+        try container.encode(citations, forKey: .citations)
         try container.encode(sessionChanges, forKey: .sessionChanges)
     }
     
@@ -74,6 +77,11 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
     
     func saveFirstDraft(name: String) {
         let autoName = name.isEmpty ? "Draft — \(formattedNow)" : name
+        
+        if title == "New Thought" || title == "Untitled Thought" {
+            title = autoName
+        }
+        
         let draft = Draft(
             name: autoName,
             content: currentContent,
@@ -105,7 +113,6 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         )
         drafts.append(draft)
         
-        // Update branch head
         if let idx = branches.firstIndex(where: { $0.name == activeBranchName }) {
             branches[idx].headDraftId = draft.id
         }
@@ -140,7 +147,6 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
     func createBranch(name: String, description: String = "") {
         guard let headDraft = currentBranchHead else { return }
         
-        // Auto-save current changes before branching
         if hasUnsavedChanges {
             saveDraft(name: "Pre-branch snapshot", comment: "Auto-saved before branching to '\(name)'")
         }
@@ -160,7 +166,6 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         guard let branch = branches.first(where: { $0.name == name }) else { return }
         guard let headDraft = drafts.first(where: { $0.id == branch.headDraftId }) else { return }
         
-        // Auto-save if needed
         if hasUnsavedChanges {
             saveDraft(name: "Auto-save", comment: "Auto-saved before switching to '\(name)'")
         }
@@ -185,7 +190,6 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         if result.isClean {
             currentContent = result.mergedContent
             
-            // Create merge commit
             let mergeCommit = Draft(
                 name: "Merge '\(sourceName)' into '\(activeBranchName)'",
                 content: result.mergedContent,
@@ -243,14 +247,12 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         }
     }
     
-    /// Re-add a change (for redo synchronization)
     func reAddChange(_ change: SemanticChange) {
         DispatchQueue.main.async { [weak self] in
             self?.sessionChanges.append(change)
         }
     }
     
-    /// Debounced working draft update — avoids thrashing on rapid edits
     func scheduleWorkingDraftUpdate() {
         workingDraftTimer?.invalidate()
         workingDraftTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
@@ -265,7 +267,6 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         }
     }
     
-    /// Immediate working draft update (for explicit saves)
     func updateWorkingDraftNow() {
         workingDraftTimer?.invalidate()
         workingDraft = WorkingDraft(content: currentContent, pendingChanges: sessionChanges)
@@ -274,15 +275,14 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
     
     // MARK: - Annotations
     
-    func addAnnotation(text: String, anchorText: String, position: Int, category: AnnotationCategory = .note) {
-        let annotation = Annotation(text: text, anchorText: anchorText, anchorPosition: position, category: category)
+    func addAnnotation(text: String, anchorText: String, position: Int) {
+        let annotation = Annotation(text: text, anchorText: anchorText, anchorPosition: position)
         annotations.append(annotation)
     }
     
-    func updateAnnotation(_ annotationId: UUID, text: String? = nil, category: AnnotationCategory? = nil) {
+    func updateAnnotation(_ annotationId: UUID, text: String) {
         guard let idx = annotations.firstIndex(where: { $0.id == annotationId }) else { return }
-        if let text = text { annotations[idx].text = text }
-        if let category = category { annotations[idx].category = category }
+        annotations[idx].text = text
         annotations[idx].updatedAt = Date()
     }
     
@@ -304,7 +304,6 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         annotations.removeAll { $0.id == annotation.id }
     }
     
-    /// Refresh all annotation positions against current content
     func refreshAnnotationPositions() {
         for i in annotations.indices {
             annotations[i].updateAnchorPosition(in: currentContent)
@@ -315,8 +314,61 @@ class Document: ObservableObject, Identifiable, Codable, Equatable {
         annotations.filter { !$0.resolved }
     }
     
-    var annotationsByCategory: [AnnotationCategory: [Annotation]] {
-        Dictionary(grouping: annotations.filter { !$0.resolved }, by: \.category)
+    // MARK: - Citations
+    
+    func addCitation(key: String, source: String, anchorText: String) {
+        let citation = Citation(key: key, source: source, anchorText: anchorText)
+        citations.append(citation)
+    }
+    
+    /// Update the source text for a citation
+    func updateCitationSource(_ citationId: UUID, source: String) {
+        guard let idx = citations.firstIndex(where: { $0.id == citationId }) else { return }
+        citations[idx].source = source
+        citations[idx].updatedAt = Date()
+    }
+    
+    /// Rename a citation key — also updates the inline [key] marker in the text
+    func renameCitationKey(_ citationId: UUID, newKey: String) {
+        guard let idx = citations.firstIndex(where: { $0.id == citationId }) else { return }
+        let oldMarker = citations[idx].marker
+        let newMarker = "[\(newKey)]"
+        
+        // Replace in document text
+        if let range = citations[idx].markerRange(in: currentContent) {
+            let nsText = currentContent as NSString
+            currentContent = nsText.replacingCharacters(in: range, with: newMarker)
+        }
+        
+        citations[idx].key = newKey
+        citations[idx].updatedAt = Date()
+    }
+    
+    /// Delete a citation and remove its inline marker from the text
+    func deleteCitation(_ citation: Citation) {
+        // Remove the [key] marker from text if it exists
+        if let range = citation.markerRange(in: currentContent) {
+            let nsText = currentContent as NSString
+            // Also consume a leading space if present
+            let expandedRange: NSRange
+            if range.location > 0 {
+                let before = nsText.substring(with: NSRange(location: range.location - 1, length: 1))
+                if before == " " {
+                    expandedRange = NSRange(location: range.location - 1, length: range.length + 1)
+                } else {
+                    expandedRange = range
+                }
+            } else {
+                expandedRange = range
+            }
+            currentContent = nsText.replacingCharacters(in: expandedRange, with: "")
+        }
+        citations.removeAll { $0.id == citation.id }
+    }
+    
+    /// Check if a key is already in use
+    func citationKeyExists(_ key: String) -> Bool {
+        citations.contains { $0.key.lowercased() == key.lowercased() }
     }
     
     // MARK: - Computed Properties

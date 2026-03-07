@@ -7,10 +7,10 @@ enum EditorMode: Equatable {
     case freeText
     case normal
     case insert(InsertContext)
-    case visual(VisualGranularity)      // Now tracks selection granularity
+    case visual(VisualGranularity)
     case command(String)
     case comp
-    case search(String)                  // / search with query
+    case search(String)
     
     var displayName: String {
         switch self {
@@ -52,12 +52,11 @@ enum EditorMode: Equatable {
 
 // MARK: - Visual Mode Granularity
 
-/// Controls what unit visual selection snaps to
 enum VisualGranularity: String, Equatable {
-    case character = "char"    // Free-form (default)
-    case word      = "word"    // Snap to word boundaries
-    case sentence  = "sent"    // Snap to sentence boundaries
-    case paragraph = "para"    // Snap to paragraph boundaries
+    case character = "char"
+    case word      = "word"
+    case sentence  = "sent"
+    case paragraph = "para"
 }
 
 // MARK: - Insert Context
@@ -68,7 +67,7 @@ enum InsertContext: Equatable {
     case sentence
     case paragraph
     case line
-    case freeform      // No auto-exit (for 'i' insert at cursor)
+    case freeform
     
     var displayName: String {
         switch self {
@@ -98,20 +97,20 @@ struct PendingVerb: Equatable {
 
 enum EditVerb: String, Equatable {
     case delete  = "d"
-    case change  = "c"
-    case refine  = "r"
+    case replace = "r"      // Was change+refine — unified as "replace"
+    case cite    = "c"      // New: mark text as needing citation
     case yank    = "y"
     case markup  = "m"
-    case move    = "x"      // Move sentence/paragraph to a target
+    case move    = "x"
     
     var displayName: String {
         switch self {
-        case .delete: return "DELETE"
-        case .change: return "CHANGE"
-        case .refine: return "REFINE"
-        case .yank:   return "YANK"
-        case .markup: return "MARKUP"
-        case .move:   return "MOVE"
+        case .delete:  return "DELETE"
+        case .replace: return "REPLACE"
+        case .cite:    return "CITE"
+        case .yank:    return "YANK"
+        case .markup:  return "MARKUP"
+        case .move:    return "MOVE"
         }
     }
     
@@ -125,19 +124,19 @@ enum EditVerb: String, Equatable {
                 ("s", "delete sentence"),
                 ("p", "delete paragraph"),
             ]
-        case .change:
+        case .replace:
             return [
-                ("w", "change word"),
-                ("c", "change clause"),
-                ("s", "change sentence"),
-                ("p", "change paragraph"),
+                ("w", "replace word"),
+                ("c", "replace clause"),
+                ("s", "replace sentence"),
+                ("p", "replace paragraph"),
             ]
-        case .refine:
+        case .cite:
             return [
-                ("w", "refine word"),
-                ("c", "refine clause"),
-                ("s", "refine sentence"),
-                ("p", "refine paragraph"),
+                ("w", "cite word"),
+                ("c", "cite clause"),
+                ("s", "cite sentence"),
+                ("p", "cite paragraph"),
             ]
         case .yank:
             return [
@@ -187,11 +186,11 @@ struct LastCommand: Equatable {
 // MARK: - Argument Structure Type
 
 enum ArgumentType: String, Equatable {
-    case evidence       = "e"   // ie: Insert evidence after claim
-    case counterargument = "c"  // ic: Insert counterargument
-    case rebuttal       = "r"   // ir: Insert rebuttal to counter
-    case bridge         = "b"   // ab: Add bridge between paragraphs
-    case transition     = "t"   // at: Add transition sentence
+    case evidence       = "e"
+    case counterargument = "c"
+    case rebuttal       = "r"
+    case bridge         = "b"
+    case transition     = "t"
     
     var displayName: String {
         switch self {
@@ -203,7 +202,6 @@ enum ArgumentType: String, Equatable {
         }
     }
     
-    /// Prefix text to insert before the user starts typing
     var promptPrefix: String {
         switch self {
         case .evidence:        return "For example, "
@@ -214,7 +212,6 @@ enum ArgumentType: String, Equatable {
         }
     }
     
-    /// Semantic context string for version history
     var context: String {
         switch self {
         case .evidence:        return "evidence"

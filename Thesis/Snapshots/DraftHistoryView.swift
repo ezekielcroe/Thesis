@@ -1,5 +1,5 @@
 // DraftHistoryView.swift — Thesis
-// Version history sidebar: commits (branch-aware), darlings, annotations (with categories)
+// Version history sidebar: commits (branch-aware), darlings, annotations (simplified)
 
 import SwiftUI
 
@@ -12,11 +12,15 @@ struct DraftHistoryView: View {
     @State private var selectedTab: HistoryTab = .commits
     @State private var editingAnnotation: Annotation?
     @State private var editText: String = ""
+    @State private var editingCitation: Citation?
+    @State private var editCitationKey: String = ""
+    @State private var editCitationSource: String = ""
     
     enum HistoryTab: String, CaseIterable {
         case commits = "History"
         case darlings = "Darlings"
         case annotations = "Notes"
+        case citations = "Cites"
     }
     
     var body: some View {
@@ -42,6 +46,7 @@ struct DraftHistoryView: View {
             case .commits:    commitsView
             case .darlings:   darlingsView
             case .annotations: annotationsView
+            case .citations:  citationsView
             }
         }
         .background(Color(NSColor.controlBackgroundColor))
@@ -52,7 +57,6 @@ struct DraftHistoryView: View {
     private var commitsView: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                // Branch indicator
                 if document.branches.count > 1 {
                     branchIndicator
                     Divider().padding(.horizontal, 12)
@@ -187,32 +191,28 @@ struct DraftHistoryView: View {
         .padding(12)
     }
     
-    // MARK: - Annotations (with categories, edit, navigate)
+    // MARK: - Annotations (simplified — flat list, no categories)
     
     private var annotationsView: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 if document.annotations.isEmpty {
-                    emptyState("No notes yet", subtitle: "Press m + object in Normal mode to annotate text.")
+                    emptyState("No notes yet", subtitle: "Press m + object in Normal mode to annotate text, or c + object to add a citation.")
                 } else {
-                    // Group by category
-                    let grouped = document.annotationsByCategory
-                    let orderedCategories = AnnotationCategory.allCases.filter { grouped[$0] != nil }
-                    
-                    ForEach(orderedCategories, id: \.self) { category in
-                        if let annotations = grouped[category] {
-                            categoryHeader(category, count: annotations.count)
-                            ForEach(annotations) { annotation in
-                                annotationCard(annotation)
-                                Divider().padding(.horizontal, 12)
-                            }
+                    // Active (unresolved) annotations
+                    let active = document.annotations.filter { !$0.resolved }
+                    if !active.isEmpty {
+                        sectionHeader("Active", count: active.count, color: .purple)
+                        ForEach(active) { annotation in
+                            annotationCard(annotation)
+                            Divider().padding(.horizontal, 12)
                         }
                     }
                     
                     // Resolved annotations
                     let resolved = document.annotations.filter(\.resolved)
                     if !resolved.isEmpty {
-                        categoryHeader(nil, count: resolved.count, label: "Resolved")
+                        sectionHeader("Resolved", count: resolved.count, color: .green)
                         ForEach(resolved) { annotation in
                             annotationCard(annotation)
                             Divider().padding(.horizontal, 12)
@@ -223,16 +223,10 @@ struct DraftHistoryView: View {
         }
     }
     
-    private func categoryHeader(_ category: AnnotationCategory?, count: Int, label: String? = nil) -> some View {
+    private func sectionHeader(_ title: String, count: Int, color: Color) -> some View {
         HStack {
-            if let cat = category {
-                Image(systemName: cat.icon).font(.system(size: 11))
-                    .foregroundColor(colorForSemanticType(cat.color))
-                Text(cat.displayName).font(.system(size: 12, weight: .semibold))
-            } else {
-                Image(systemName: "checkmark.circle").font(.system(size: 11)).foregroundColor(.green)
-                Text(label ?? "").font(.system(size: 12, weight: .semibold))
-            }
+            Circle().fill(color).frame(width: 6, height: 6)
+            Text(title).font(.system(size: 12, weight: .semibold))
             Text("(\(count))").font(.system(size: 11)).foregroundColor(.secondary)
             Spacer()
         }
@@ -243,9 +237,9 @@ struct DraftHistoryView: View {
     private func annotationCard(_ annotation: Annotation) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Image(systemName: annotation.resolved ? "checkmark.circle.fill" : annotation.category.icon)
+                Image(systemName: annotation.resolved ? "checkmark.circle.fill" : "note.text")
                     .font(.system(size: 10))
-                    .foregroundColor(annotation.resolved ? .green : colorForSemanticType(annotation.category.color))
+                    .foregroundColor(annotation.resolved ? .green : .purple)
                 Text(annotation.displayTimestamp).font(.system(size: 10)).foregroundColor(.secondary)
                 
                 if annotation.isStale {
@@ -256,7 +250,7 @@ struct DraftHistoryView: View {
                 
                 Spacer()
                 
-                // Navigate button
+                // Navigate to anchor in editor
                 Button {
                     onNavigateToAnnotation?(annotation)
                 } label: {
@@ -302,6 +296,134 @@ struct DraftHistoryView: View {
             }
         }
         .padding(12)
+    }
+    
+    // MARK: - Citations
+    
+    private var citationsView: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                if document.citations.isEmpty {
+                    emptyState("No citations yet", subtitle: "Press c + object in Normal mode to cite text.\nA [Key] marker will be inserted inline.")
+                } else {
+                    // Active citations (marker still in text)
+                    let active = document.citations.filter { !$0.isOrphaned(in: document.currentContent) }
+                    let orphaned = document.citations.filter { $0.isOrphaned(in: document.currentContent) }
+                    
+                    if !active.isEmpty {
+                        sectionHeader("Active", count: active.count, color: .teal)
+                        ForEach(active) { citation in
+                            citationCard(citation, isOrphaned: false)
+                            Divider().padding(.horizontal, 12)
+                        }
+                    }
+                    
+                    if !orphaned.isEmpty {
+                        sectionHeader("Orphaned", count: orphaned.count, color: .orange)
+                        ForEach(orphaned) { citation in
+                            citationCard(citation, isOrphaned: true)
+                            Divider().padding(.horizontal, 12)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private func citationCard(_ citation: Citation, isOrphaned: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(citation.marker)
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .foregroundColor(isOrphaned ? .orange : .teal)
+                
+                if isOrphaned {
+                    Text("marker missing")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(.orange)
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(Color.orange.opacity(0.1)).cornerRadius(3)
+                }
+                
+                Spacer()
+                
+                Text(citation.displayTimestamp)
+                    .font(.system(size: 10)).foregroundColor(.secondary)
+            }
+            
+            // Show what text is being cited
+            Text("on: \"\(String(citation.anchorText.prefix(60)))\"")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(.secondary).lineLimit(1)
+            
+            if editingCitation?.id == citation.id {
+                // Editing mode
+                VStack(spacing: 6) {
+                    HStack(spacing: 4) {
+                        Text("Key:").font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+                        TextField("Key", text: $editCitationKey)
+                            .textFieldStyle(.roundedBorder).font(.system(size: 11))
+                    }
+                    HStack(spacing: 4) {
+                        Text("Src:").font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+                        TextField("Source", text: $editCitationSource)
+                            .textFieldStyle(.roundedBorder).font(.system(size: 11))
+                    }
+                    HStack(spacing: 6) {
+                        Button("Save") {
+                            let cleanKey = editCitationKey
+                                .replacingOccurrences(of: "[", with: "")
+                                .replacingOccurrences(of: "]", with: "")
+                                .trimmingCharacters(in: .whitespaces)
+                            if !cleanKey.isEmpty && cleanKey != citation.key {
+                                document.renameCitationKey(citation.id, newKey: cleanKey)
+                            }
+                            document.updateCitationSource(citation.id, source: editCitationSource)
+                            editingCitation = nil
+                        }
+                        .font(.system(size: 10)).buttonStyle(.borderless).foregroundColor(.blue)
+                        Button("Cancel") { editingCitation = nil }
+                            .font(.system(size: 10)).buttonStyle(.borderless).foregroundColor(.secondary)
+                    }
+                }
+            } else {
+                // Display mode
+                if !citation.source.isEmpty {
+                    Text(citation.source)
+                        .font(.system(size: 11)).foregroundColor(.primary)
+                        .lineLimit(3)
+                } else {
+                    Text("No source details")
+                        .font(.system(size: 11)).foregroundColor(.secondary).italic()
+                }
+            }
+            
+            HStack(spacing: 8) {
+                if !isOrphaned {
+                    Button("Jump") {
+                        // Navigate to the marker in the editor
+                        if let range = citation.markerRange(in: document.currentContent) {
+                            onNavigateToAnnotation?(
+                                // Reuse the annotation navigation callback with a dummy Annotation
+                                // to position the editor at the citation's location
+                                Annotation(text: "", anchorText: citation.marker, anchorPosition: range.location)
+                            )
+                        }
+                    }
+                    .font(.system(size: 10)).buttonStyle(.borderless).foregroundColor(.blue)
+                }
+                Button("Edit") {
+                    editCitationKey = citation.key
+                    editCitationSource = citation.source
+                    editingCitation = citation
+                }
+                .font(.system(size: 10)).buttonStyle(.borderless).foregroundColor(.blue)
+                Button("Delete") { document.deleteCitation(citation) }
+                    .font(.system(size: 10)).buttonStyle(.borderless).foregroundColor(.red)
+            }
+        }
+        .padding(12)
+        .opacity(isOrphaned ? 0.7 : 1)
     }
     
     private func emptyState(_ title: String, subtitle: String) -> some View {
