@@ -14,6 +14,8 @@ struct StatusBar: View {
     let undoPreview: String?
     let annotationCount: Int
     let sessionSummary: String
+    let searchMatchCount: Int
+    let pendingArgument: Bool
     
     var body: some View {
         HStack(spacing: 12) {
@@ -65,11 +67,18 @@ struct StatusBar: View {
     }
     
     private var modeDisplayText: String {
+        if pendingArgument {
+            return "ARGUMENT…"
+        }
         if let verb = pendingVerb {
             return "\(mode.displayName) → \(verb.displayName)…"
         }
         if case .command(let text) = mode {
             return ":\(text)"
+        }
+        if case .search(let query) = mode {
+            let countStr = searchMatchCount > 0 ? " [\(searchMatchCount)]" : " [no match]"
+            return "/\(query)\(query.isEmpty ? "" : countStr)"
         }
         return mode.displayName
     }

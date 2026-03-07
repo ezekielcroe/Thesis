@@ -105,6 +105,7 @@ struct EditorContainer: View {
     @ObservedObject var document: Document
     @Binding var showingHistory: Bool
     let onSave: () -> Void
+    @State private var annotationNavPosition: Int? = nil
     
     var body: some View {
         VStack(spacing: 0) {
@@ -124,7 +125,7 @@ struct EditorContainer: View {
             Divider()
             
             HSplitView {
-                ModalEditor(document: .constant(document))
+                ModalEditor(document: document, annotationNavPosition: $annotationNavPosition)
                     .frame(minWidth: 500)
                 
                 if showingHistory {
@@ -135,8 +136,10 @@ struct EditorContainer: View {
                             onSave()
                         },
                         onNavigateToAnnotation: { annotation in
-                            // Navigation would scroll the editor to the annotation's position
-                            // For now this is wired through as a callback
+                            // Find the annotation's current position and navigate to it
+                            if let range = annotation.currentRange(in: document.currentContent) {
+                                annotationNavPosition = range.location
+                            }
                         },
                         onClose: { showingHistory = false }
                     )

@@ -231,3 +231,174 @@ struct MergeSheet: View {
         .padding(24).frame(width: 400)
     }
 }
+
+// MARK: - Help Sheet
+
+struct HelpSheet: View {
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "keyboard").font(.system(size: 28)).foregroundColor(.blue)
+            Text("Quick Reference").font(.headline)
+            
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    helpSection("Modes", items: [
+                        ("ESC", "Return to Normal mode / Save first draft"),
+                        ("i", "Insert at cursor (freeform)"),
+                        ("a", "Append after sentence"),
+                        ("v", "Visual selection mode"),
+                        (":", "Command mode"),
+                        ("/", "Search"),
+                    ])
+                    helpSection("Navigation", items: [
+                        ("h / l", "Previous / next sentence"),
+                        ("H / L", "Previous / next clause"),
+                        ("j / k", "Next / previous paragraph"),
+                        ("J / K", "Next / previous line"),
+                        ("w / b", "Next / previous word"),
+                        ("gg", "Jump to top"),
+                        ("G", "Jump to bottom"),
+                        ("n / N", "Next / previous search result"),
+                    ])
+                    helpSection("Editing (verb + object)", items: [
+                        ("d + s/c/p/w", "Delete sentence/clause/paragraph/word"),
+                        ("c + s/c/p/w", "Change (replace) sentence/clause/paragraph/word"),
+                        ("r + s/c/p/w", "Refine (improve wording) sentence/clause/paragraph/word"),
+                        ("y + s/c/p/w", "Yank (copy) to register"),
+                        ("p", "Paste from register"),
+                        ("x + s/p", "Move sentence/paragraph (then j/k, Enter)"),
+                        ("m + s/c/p/w", "Annotate (add note)"),
+                        ("D / C / R", "Delete/Change/Refine to end of sentence"),
+                        (".", "Repeat last command"),
+                        ("u", "Undo"),
+                        ("Ctrl+r", "Redo"),
+                    ])
+                    helpSection("Argument Structure ('prefix)", items: [
+                        ("'e", "Insert evidence after claim"),
+                        ("'c", "Insert counterargument"),
+                        ("'r", "Insert rebuttal"),
+                        ("'b", "Add bridge between paragraphs"),
+                        ("'t", "Add transition sentence"),
+                    ])
+                    helpSection("Commands", items: [
+                        (":save / :commit", "Save draft with message"),
+                        (":comp / :diff", "Compare with last draft"),
+                        (":branch", "Manage branches"),
+                        (":merge", "Merge a branch"),
+                        (":log", "View commit history"),
+                        (":help", "Show this help"),
+                        (":ie :ic :ir :ab :at", "Argument commands (long form)"),
+                    ])
+                }
+            }
+            .frame(maxHeight: 500)
+            
+            Button("Close") { dismiss() }
+                .keyboardShortcut(.escape).buttonStyle(.borderedProminent)
+        }
+        .padding(24).frame(width: 520)
+    }
+    
+    private func helpSection(_ title: String, items: [(String, String)]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                .foregroundColor(.blue)
+            Divider()
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                HStack(alignment: .top, spacing: 12) {
+                    Text(item.0)
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .frame(width: 160, alignment: .trailing)
+                        .foregroundColor(.primary)
+                    Text(item.1)
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Log Sheet (Inline History)
+
+struct LogSheet: View {
+    @ObservedObject var document: Document
+    let onRestore: (Draft) -> Void
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "clock.arrow.circlepath").font(.system(size: 28)).foregroundColor(.blue)
+            Text("Commit History").font(.headline)
+            
+            if document.branches.count > 1 {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.triangle.branch").font(.system(size: 11)).foregroundColor(.purple)
+                    Text(document.activeBranchName)
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                }
+            }
+            
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    if document.hasUnsavedChanges {
+                        logEntry(
+                            icon: "circle.fill", iconColor: .orange,
+                            title: "Working Draft (unsaved)",
+                            subtitle: document.sessionChangeSummary,
+                            timestamp: "now", isHead: true
+                        )
+                    }
+                    
+                    let branchDrafts = document.currentBranchDrafts.reversed()
+                    ForEach(Array(branchDrafts)) { draft in
+                        logEntry(
+                            icon: draft.isFirstDraft ? "flag.fill" : draft.isMergeCommit ? "arrow.triangle.merge" : "circle.fill",
+                            iconColor: draft.isFirstDraft ? .green : draft.isMergeCommit ? .purple : .blue,
+                            title: draft.displayName,
+                            subtitle: draft.comment.isEmpty ? draft.changeSummary : draft.comment,
+                            timestamp: draft.displayTimestamp,
+                            isHead: false
+                        )
+                        .contextMenu {
+                            Button("Restore to this draft") { dismiss(); onRestore(draft) }
+                        }
+                    }
+                    
+                    if document.drafts.isEmpty {
+                        Text("No commits yet").foregroundColor(.secondary).padding(20)
+                    }
+                }
+            }
+            .frame(maxHeight: 400)
+            
+            Button("Close") { dismiss() }
+                .keyboardShortcut(.escape).buttonStyle(.borderedProminent)
+        }
+        .padding(24).frame(width: 480)
+    }
+    
+    private func logEntry(icon: String, iconColor: Color, title: String, subtitle: String, timestamp: String, isHead: Bool) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(spacing: 0) {
+                Image(systemName: icon).font(.system(size: 8)).foregroundColor(iconColor)
+                Rectangle().fill(Color.secondary.opacity(0.2)).frame(width: 1)
+            }
+            .frame(width: 16)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text(title).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                    Spacer()
+                    Text(timestamp).font(.system(size: 10)).foregroundColor(.secondary)
+                }
+                Text(subtitle).font(.system(size: 11)).foregroundColor(.secondary).lineLimit(2)
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(isHead ? Color.orange.opacity(0.05) : Color.clear)
+    }
+}
