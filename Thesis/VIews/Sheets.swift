@@ -1,11 +1,3 @@
-//
-//  NoteSheet.swift
-//  Thesis
-//
-//  Created by Zhi Zheng Yeo on 2/11/26.
-//
-
-
 // Sheets.swift — Thesis
 // Adding a note, the key reference, and Settings.
 
@@ -96,11 +88,23 @@ struct HelpSheet: View {
             ("ds … p", "Cut a sentence, move, put it after the sentence there"),
             ("dp … p", "Same for a paragraph"),
         ]),
+        ("Markdown", [
+            ("# Heading", "Headings (## and ### for smaller ones)"),
+            ("**bold**  *italic*", "Emphasis; ~~strikethrough~~ and `code` too"),
+            ("- item  /  1. item", "Bulleted and numbered lists (indent to nest)"),
+            ("> quote", "Block quote"),
+            ("```", "A line of three backticks opens and closes a code block"),
+            ("[text](https://…)", "Link"),
+            ("⇧⌘P  or  :preview", "Formatted preview; ESC to go back"),
+        ]),
         ("Commands", [
             ("⌘S  or  :w", "Review changes, give reasons, save a named snapshot"),
             (":w name", "Save a named snapshot straight away"),
             (":review", "Review changes since the last named snapshot"),
             (":history  :darlings  :notes", "Open the Evolution panel"),
+            (":rename  or  ⇧⌘R", "Rename the document (:rename New title does it directly)"),
+            (":export txt|md|pdf", "Export the current text"),
+            (":export archive", "Export a .thesis archive with full history (File ▸ Import Archive… reads it)"),
             ("⌘,", "Settings — when automatic snapshots are taken"),
             (":help", "This sheet"),
         ]),
@@ -145,6 +149,7 @@ struct SettingsView: View {
     @AppStorage(SnapshotSettings.triggerKey) private var trigger: SnapshotTrigger = .pause
     @AppStorage(SnapshotSettings.pauseKey) private var pauseSeconds = SnapshotSettings.defaultPauseSeconds
     @AppStorage(SnapshotSettings.intervalKey) private var intervalMinutes = SnapshotSettings.defaultIntervalMinutes
+    @AppStorage(MarkdownSettings.styleEditorKey) private var markdownStyling = true
 
     var body: some View {
         Form {
@@ -172,6 +177,14 @@ struct SettingsView: View {
             Text("Named snapshots (⌘S or :w) are always available, whichever you choose.")
                 .font(.callout)
                 .foregroundColor(.secondary)
+
+            Divider().padding(.vertical, 6)
+
+            Toggle("Format Markdown while writing", isOn: $markdownStyling)
+            Text("Shows headings, **bold**, *italic*, `code`, quotes and lists formatted in the editor. The Markdown characters stay visible but faint. The preview (⇧⌘P) and PDF export always show the formatted result.")
+                .font(.callout)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(20)
         .frame(width: 460)

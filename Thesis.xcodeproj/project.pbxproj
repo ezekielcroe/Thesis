@@ -28,6 +28,7 @@
 				DocumentExportTests.swift,
 				DocumentTests.swift,
 				EditorEngineTests.swift,
+				MarkdownTests.swift,
 				ProseDiffTests.swift,
 			);
 			target = FE5783792F3311B8008D37D4 /* Thesis */;
@@ -38,6 +39,7 @@
 				DocumentExportTests.swift,
 				DocumentTests.swift,
 				EditorEngineTests.swift,
+				MarkdownTests.swift,
 				ProseDiffTests.swift,
 			);
 			target = FEA9F526309888840020CF18 /* ThesisTests */;

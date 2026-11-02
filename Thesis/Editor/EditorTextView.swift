@@ -8,6 +8,8 @@ import AppKit
 struct EditorTextView: NSViewRepresentable {
     @ObservedObject var document: Document
     @ObservedObject var engine: EditorEngine
+    /// Format Markdown while writing (Settings).
+    var markdownStyling: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator(document: document, engine: engine)
@@ -68,6 +70,10 @@ struct EditorTextView: NSViewRepresentable {
         textView.engine = engine
         engine.attach(textView)
 
+        let styler = MarkdownStyler(baseFont: font, baseParagraphStyle: paragraph, enabled: markdownStyling)
+        context.coordinator.styler = styler
+        if let storage = textView.textStorage { styler.restyleAll(storage) }
+
         scrollView.documentView = textView
         DispatchQueue.main.async { textView.window?.makeFirstResponder(textView) }
         return scrollView
@@ -77,6 +83,11 @@ struct EditorTextView: NSViewRepresentable {
         guard let textView = scrollView.documentView as? ModalTextView else { return }
         textView.insertionPointColor = engine.mode == .insert ? .textColor : .systemBlue
         textView.showNotes(document.notes)
+        if let styler = context.coordinator.styler, styler.enabled != markdownStyling,
+           let storage = textView.textStorage {
+            styler.enabled = markdownStyling
+            styler.restyleAll(storage)
+        }
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate {
@@ -84,6 +95,7 @@ struct EditorTextView: NSViewRepresentable {
         let engine: EditorEngine
         /// One undo history per document, separate from the title field's.
         let undoManager = UndoManager()
+        var styler: MarkdownStyler?
 
         init(document: Document, engine: EditorEngine) {
             self.document = document
@@ -101,6 +113,15 @@ struct EditorTextView: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             engine.selectionDidChange()
+        }
+
+        /// Restyles the edited lines before layout, so formatting appears as you type.
+        func textStorage(_ textStorage: NSTextStorage,
+                         willProcessEditing editedMask: NSTextStorageEditActions,
+                         range editedRange: NSRange,
+                         changeInLength delta: Int) {
+            guard editedMask.contains(.editedCharacters) else { return }
+            styler?.restyle(textStorage, editedRange: editedRange)
         }
 
         /// Sees every character change, whatever caused it, so notes stay attached.
@@ -180,6 +201,8 @@ final class ModalTextView: NSTextView, TextBuffer {
     }
 
     func revealCursor() { scrollRangeToVisible(selectedRange()) }
+
+    func focus() { window?.makeFirstResponder(self) }
 
     func flash(_ range: NSRange) {
         let target = clamp(range)

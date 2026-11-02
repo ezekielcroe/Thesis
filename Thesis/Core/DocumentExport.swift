@@ -45,13 +45,16 @@ enum DocumentExport {
         return text.hasSuffix("\n") || text.isEmpty ? text : text + "\n"
     }
 
-    /// Title as a heading, then one paragraph per block. Markdown needs a blank line
-    /// between paragraphs; the editor treats every non-blank line as a paragraph.
+    /// The title as a heading, then the text as Markdown. Markdown is kept as written,
+    /// with blank lines added where the editor's one-line-per-paragraph convention
+    /// needs them (see MarkdownSource), so other apps show the same paragraphs.
     static func markdown(_ document: Document) -> String {
-        let paragraphs = TextUnits(document.content).paragraphs.map(\.text)
         let title = document.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let heading = title.isEmpty ? [] : ["# \(title)"]
-        return (heading + paragraphs).joined(separator: "\n\n") + "\n"
+        var body = MarkdownSource.normalizedForRendering(document.content)
+        while body.hasSuffix("\n") { body.removeLast() }
+        while body.hasPrefix("\n") { body.removeFirst() }
+        let heading = title.isEmpty ? "" : "# \(title)\n\n"
+        return heading + body + "\n"
     }
 
     static func suggestedFileName(title: String, format: ExportFormat) -> String {

@@ -9,7 +9,9 @@ struct EditorView: View {
     @EnvironmentObject private var documentManager: DocumentManager
     @StateObject private var engine: EditorEngine
     @AppStorage("showEvolutionPanel") private var showingPanel = false
+    @AppStorage(MarkdownSettings.styleEditorKey) private var markdownStyling = true
     @State private var panelTab: PanelTab = .history
+    @State private var showingPreview = false
 
     init(document: Document) {
         self.document = document
@@ -23,13 +25,21 @@ struct EditorView: View {
             HSplitView {
                 VStack(spacing: 0) {
                     ZStack(alignment: .topTrailing) {
-                        EditorTextView(document: document, engine: engine)
+                        // The editor stays alive under the preview, so undo history,
+                        // the cursor and the mode survive switching back and forth.
+                        EditorTextView(document: document, engine: engine, markdownStyling: markdownStyling)
                             .border(engine.mode.color.opacity(0.5), width: 2)
-                        if let op = engine.pendingOperator {
+                        if let op = engine.pendingOperator, !showingPreview {
                             OperatorHelp(op: op).padding(10)
+                        }
+                        if showingPreview {
+                            MarkdownPreview(title: document.title, markdown: document.content,
+                                            onClose: { togglePreview() })
+                                .border(Color.gray.opacity(0.5), width: 2)
                         }
                     }
                     StatusBar(
+                        isPreviewing: showingPreview,
                         mode: engine.mode,
                         pending: engine.pending,
                         message: engine.message,
@@ -83,6 +93,12 @@ struct EditorView: View {
                 documentManager.requestName(for: document)
             }
         }
+        .onReceive(engine.$previewRequested.filter { $0 }) { _ in
+            DispatchQueue.main.async {
+                engine.previewRequested = false
+                togglePreview()
+            }
+        }
         .onReceive(engine.$exportRequest.compactMap { $0 }) { format in
             // Also lets the key event finish before the modal save panel takes over.
             DispatchQueue.main.async {
@@ -113,6 +129,15 @@ struct EditorView: View {
             .help("Rename (⇧⌘R or :rename)")
             .padding()
             Spacer()
+            Button {
+                togglePreview()
+            } label: {
+                Label(showingPreview ? "Edit" : "Preview",
+                      systemImage: showingPreview ? "pencil.line" : "eye")
+            }
+            .buttonStyle(.borderless)
+            .keyboardShortcut("p", modifiers: [.command, .shift])
+            .help("Show the formatted document (⇧⌘P or :preview); ESC to go back")
             Menu {
                 ForEach(ExportFormat.allCases) { format in
                     Button(format.menuTitle) { Exporter.export(document, as: format) }
@@ -133,6 +158,16 @@ struct EditorView: View {
             .padding(.trailing)
         }
         .background(Color(NSColor.controlBackgroundColor))
+    }
+
+    private func togglePreview() {
+        if showingPreview {
+            showingPreview = false
+            DispatchQueue.main.async { engine.focusEditor() }
+        } else {
+            engine.prepareForPreview()
+            showingPreview = true
+        }
     }
 
     private var snapshotInfo: String {
@@ -191,6 +226,7 @@ extension EditorMode {
 }
 
 struct StatusBar: View {
+    var isPreviewing = false
     let mode: EditorMode
     let pending: PendingKey
     let message: String?
@@ -207,7 +243,7 @@ struct StatusBar: View {
                 .foregroundColor(.white)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
-                .background(mode.color)
+                .background(isPreviewing ? Color.gray : mode.color)
                 .cornerRadius(4)
 
             if let message = message {
@@ -236,6 +272,7 @@ struct StatusBar: View {
     }
 
     private var modeLabel: String {
+        if isPreviewing { return "PREVIEW" }
         switch mode {
         case .command(let text):
             return ":" + text

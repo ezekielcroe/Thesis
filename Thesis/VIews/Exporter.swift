@@ -144,7 +144,9 @@ enum Exporter {
         textView.textContainerInset = .zero
         textView.textContainer?.lineFragmentPadding = 0
         textView.isVerticallyResizable = true
-        textView.textStorage?.setAttributedString(attributedText(for: document))
+        textView.textStorage?.setAttributedString(
+            MarkdownRenderer.render(title: document.title, markdown: document.content, style: .print)
+        )
         if let layoutManager = textView.layoutManager, let container = textView.textContainer {
             layoutManager.ensureLayout(for: container)
             let height = layoutManager.usedRect(for: container).height
@@ -155,38 +157,6 @@ enum Exporter {
         operation.showsPrintPanel = false
         operation.showsProgressPanel = false
         guard operation.run() else { throw ExportError.pdfFailed }
-    }
-
-    /// Black on white whatever the app's appearance, so PDFs print correctly in dark mode.
-    private static func attributedText(for document: Document) -> NSAttributedString {
-        let result = NSMutableAttributedString()
-
-        let title = document.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !title.isEmpty {
-            let titleStyle = NSMutableParagraphStyle()
-            titleStyle.paragraphSpacing = 18
-            result.append(NSAttributedString(string: title + "\n", attributes: [
-                .font: serif(size: 20, bold: true),
-                .foregroundColor: NSColor.black,
-                .paragraphStyle: titleStyle,
-            ]))
-        }
-
-        let bodyStyle = NSMutableParagraphStyle()
-        bodyStyle.lineSpacing = 3
-        bodyStyle.paragraphSpacing = 9
-        let paragraphs = TextUnits(document.content).paragraphs.map(\.text)
-        result.append(NSAttributedString(string: paragraphs.joined(separator: "\n"), attributes: [
-            .font: serif(size: 12, bold: false),
-            .foregroundColor: NSColor.black,
-            .paragraphStyle: bodyStyle,
-        ]))
-        return result
-    }
-
-    private static func serif(size: CGFloat, bold: Bool) -> NSFont {
-        let base = NSFont.systemFont(ofSize: size, weight: bold ? .bold : .regular)
-        return base.fontDescriptor.withDesign(.serif).flatMap { NSFont(descriptor: $0, size: size) } ?? base
     }
 }
 

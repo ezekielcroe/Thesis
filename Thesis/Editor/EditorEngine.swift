@@ -96,6 +96,8 @@ final class EditorEngine: ObservableObject {
     @Published var renameRequested = false
     /// Set by `:export <format>`; the view shows the save panel.
     @Published var exportRequest: ExportFormat?
+    /// Set by `:preview`; the view toggles the formatted preview.
+    @Published var previewRequested = false
 
     var register: Register?
 
@@ -150,6 +152,17 @@ final class EditorEngine: ObservableObject {
     // MARK: - Actions from the UI
 
     func openReview() { activeSheet = .review }
+
+    /// Before the preview covers the editor: finish typing, drop selections and pending keys.
+    func prepareForPreview() {
+        leaveTransientModes()
+        buffer?.setHighlight(nil)
+    }
+
+    /// After the preview closes: give the keyboard back to the text.
+    func focusEditor() {
+        buffer?.focus()
+    }
 
     func jump(to range: NSRange) {
         leaveTransientModes()
@@ -553,6 +566,7 @@ final class EditorEngine: ObservableObject {
             } else {
                 renameRequested = true
             }
+        case "preview", "p": previewRequested = true
         case "export":
             if let format = argument.flatMap(ExportFormat.init(command:)) {
                 exportRequest = format

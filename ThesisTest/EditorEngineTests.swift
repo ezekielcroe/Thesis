@@ -42,6 +42,7 @@ final class TestBuffer: TextBuffer {
     func endTyping() {}
     func moveVisualLine(down: Bool) {}
     func revealCursor() {}
+    func focus() {}
     func flash(_ range: NSRange) {}
     func setHighlight(_ range: NSRange?) { highlight = range }
 }
