@@ -26,5 +26,49 @@
     <string>NSApplication</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.productivity</string>
+
+    <!-- 1. Declare the .thesis file type. Thesis owns it, so it is "exported". -->
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.thesis.app.archive</string>
+            <key>UTTypeDescription</key>
+            <string>Thesis Archive</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.json</string>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>thesis</string>
+                </array>
+                <key>public.mime-type</key>
+                <array>
+                    <string>application/vnd.thesis-archive+json</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
+
+    <!-- 2. Tell Finder that Thesis opens that type (and is its default app). -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Thesis Archive</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.thesis.app.archive</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>

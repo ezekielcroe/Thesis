@@ -6,14 +6,57 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		FEA9F52B309888840020CF18 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = FE5783722F3311B8008D37D4 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = FE5783792F3311B8008D37D4;
+			remoteInfo = Thesis;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		FE57837A2F3311B8008D37D4 /* Thesis.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Thesis.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		FEA9F527309888840020CF18 /* ThesisTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ThesisTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		FEA9F534309888BC0020CF18 /* Exceptions for "ThesisTest" folder in "Thesis" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				DocumentExportTests.swift,
+				DocumentTests.swift,
+				EditorEngineTests.swift,
+				ProseDiffTests.swift,
+			);
+			target = FE5783792F3311B8008D37D4 /* Thesis */;
+		};
+		FEA9F535309888BC0020CF18 /* Exceptions for "ThesisTest" folder in "ThesisTests" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				DocumentExportTests.swift,
+				DocumentTests.swift,
+				EditorEngineTests.swift,
+				ProseDiffTests.swift,
+			);
+			target = FEA9F526309888840020CF18 /* ThesisTests */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		FE57837C2F3311B8008D37D4 /* Thesis */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Thesis;
+			sourceTree = "<group>";
+		};
+		FEA9F4FE309884BF0020CF18 /* ThesisTest */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				FEA9F534309888BC0020CF18 /* Exceptions for "ThesisTest" folder in "Thesis" target */,
+				FEA9F535309888BC0020CF18 /* Exceptions for "ThesisTest" folder in "ThesisTests" target */,
+			);
+			path = ThesisTest;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -26,12 +69,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		FEA9F524309888840020CF18 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		FE5783712F3311B8008D37D4 = {
 			isa = PBXGroup;
 			children = (
+				FEA9F4FE309884BF0020CF18 /* ThesisTest */,
 				FE57837C2F3311B8008D37D4 /* Thesis */,
 				FE57837B2F3311B8008D37D4 /* Products */,
 			);
@@ -41,6 +92,7 @@
 			isa = PBXGroup;
 			children = (
 				FE57837A2F3311B8008D37D4 /* Thesis.app */,
+				FEA9F527309888840020CF18 /* ThesisTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -62,6 +114,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				FE57837C2F3311B8008D37D4 /* Thesis */,
+				FEA9F4FE309884BF0020CF18 /* ThesisTest */,
 			);
 			name = Thesis;
 			packageProductDependencies = (
@@ -70,6 +123,26 @@
 			productReference = FE57837A2F3311B8008D37D4 /* Thesis.app */;
 			productType = "com.apple.product-type.application";
 		};
+		FEA9F526309888840020CF18 /* ThesisTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FEA9F52D309888840020CF18 /* Build configuration list for PBXNativeTarget "ThesisTests" */;
+			buildPhases = (
+				FEA9F523309888840020CF18 /* Sources */,
+				FEA9F524309888840020CF18 /* Frameworks */,
+				FEA9F525309888840020CF18 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				FEA9F52C309888840020CF18 /* PBXTargetDependency */,
+			);
+			name = ThesisTests;
+			packageProductDependencies = (
+			);
+			productName = ThesisTests;
+			productReference = FEA9F527309888840020CF18 /* ThesisTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -77,12 +150,16 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastSwiftUpdateCheck = 2620;
+				LastSwiftUpdateCheck = 2720;
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
 					FE5783792F3311B8008D37D4 = {
 						CreatedOnToolsVersion = 26.2;
 						LastSwiftMigration = 2620;
+					};
+					FEA9F526309888840020CF18 = {
+						CreatedOnToolsVersion = 27.2;
+						TestTargetID = FE5783792F3311B8008D37D4;
 					};
 				};
 			};
@@ -101,12 +178,20 @@
 			projectRoot = "";
 			targets = (
 				FE5783792F3311B8008D37D4 /* Thesis */,
+				FEA9F526309888840020CF18 /* ThesisTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		FE5783782F3311B8008D37D4 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FEA9F525309888840020CF18 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -123,7 +208,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		FEA9F523309888840020CF18 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		FEA9F52C309888840020CF18 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = FE5783792F3311B8008D37D4 /* Thesis */;
+			targetProxy = FEA9F52B309888840020CF18 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		FE5783832F3311BA008D37D4 /* Debug */ = {
@@ -263,8 +363,18 @@
 				DEVELOPMENT_TEAM = 9Y77PNP57U;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = NO;
 				ENABLE_PREVIEWS = YES;
-				ENABLE_USER_SELECTED_FILES = readonly;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -300,8 +410,18 @@
 				DEVELOPMENT_TEAM = 9Y77PNP57U;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = NO;
 				ENABLE_PREVIEWS = YES;
-				ENABLE_USER_SELECTED_FILES = readonly;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -323,6 +443,48 @@
 			};
 			name = Release;
 		};
+		FEA9F52E309888840020CF18 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 9Y77PNP57U;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 27.2;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = GeekyZeke.ThesisTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Thesis.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Thesis";
+			};
+			name = Debug;
+		};
+		FEA9F52F309888840020CF18 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 9Y77PNP57U;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 27.2;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = GeekyZeke.ThesisTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Thesis.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Thesis";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -340,6 +502,15 @@
 			buildConfigurations = (
 				FE5783862F3311BA008D37D4 /* Debug */,
 				FE5783872F3311BA008D37D4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FEA9F52D309888840020CF18 /* Build configuration list for PBXNativeTarget "ThesisTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FEA9F52E309888840020CF18 /* Debug */,
+				FEA9F52F309888840020CF18 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

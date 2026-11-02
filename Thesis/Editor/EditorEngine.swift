@@ -1,973 +1,689 @@
 // EditorEngine.swift — Thesis
-// Dedicated controller for Vim-style modal editing, text mutation, and change tracking.
+// The modal editing grammar. Platform-independent: it edits text only through
+// `TextBuffer`, so it can be tested without AppKit.
+//
+// Three ways of being in the text:
+//   NORMAL — move and act on units of prose (words, clauses, sentences, paragraphs)
+//   INSERT — write. Ordinary typing: arrows, mouse, backspace all work. ESC to leave.
+//   VISUAL — select whole units by moving, then act on the selection
+// plus the `:` command line and `/` search.
 
-import SwiftUI
-import AppKit
+import Foundation
 import Combine
 
+enum EditorMode: Equatable {
+    case normal
+    case insert
+    case visual
+    case command(String)
+    case search(String)
+
+    var displayName: String {
+        switch self {
+        case .normal: return "NORMAL"
+        case .insert: return "INSERT"
+        case .visual: return "VISUAL"
+        case .command: return "COMMAND"
+        case .search: return "SEARCH"
+        }
+    }
+}
+
+enum Operator: Character, CaseIterable {
+    case delete = "d", change = "c", yank = "y", note = "m"
+
+    var displayName: String {
+        switch self {
+        case .delete: return "Delete"
+        case .change: return "Change"
+        case .yank: return "Yank"
+        case .note: return "Note"
+        }
+    }
+}
+
+enum PendingKey: Equatable {
+    case none
+    case g
+    case op(Operator)
+}
+
+enum KeyInput: Equatable {
+    case char(Character)
+    case escape
+    case enter
+    case backspace
+    case ctrl(Character)
+}
+
+struct Register: Equatable {
+    var text: String
+    var kind: UnitKind
+}
+
 enum EditorSheet: Identifiable {
-    case firstDraft
-    case save
-    case annotation(anchorText: String, position: Int)
-    case citation(anchorText: String, insertPosition: Int)
-    case branch
-    case merge
-    case log
+    case review
+    case note(range: NSRange, anchor: String)
     case help
-    
+
     var id: String {
         switch self {
-        case .firstDraft: return "firstDraft"
-        case .save: return "save"
-        case .annotation: return "annotation"
-        case .citation: return "citation"
-        case .branch: return "branch"
-        case .merge: return "merge"
-        case .log: return "log"
+        case .review: return "review"
+        case .note: return "note"
         case .help: return "help"
         }
     }
 }
 
-class EditorEngine: ObservableObject {
-    // Core Dependencies
+enum PanelTab: String, CaseIterable, Identifiable {
+    case history = "History", darlings = "Darlings", notes = "Notes"
+    var id: String { rawValue }
+}
+
+final class EditorEngine: ObservableObject {
     let document: Document
-    
-    // Published View State
-    @Published var mode: EditorMode = .freeText
-    @Published var cursorPosition: Int = 0
-    @Published var selectionRange: NSRange?
-    @Published var highlightRange: NSRange?
-    @Published var flashRange: NSRange?
-    @Published var diffChanges: [DiffChange] = []
-    
-    // Overlay & Status State
-    @Published var pendingVerb: PendingVerb?
-    @Published var movePayload: TextUnit?
-    @Published var stats: TextAnalyzer.Stats = .init(paragraphCount: 0, sentenceCount: 0, wordCount: 0)
+    private(set) weak var buffer: TextBuffer?
+    let snapshots: SnapshotScheduler
+
+    @Published private(set) var mode: EditorMode
+    @Published private(set) var pending: PendingKey = .none
+    @Published private(set) var message: String?
+    @Published private(set) var stats = TextStats.zero
+    @Published private(set) var searchMatchCount = 0
     @Published var activeSheet: EditorSheet?
-    
-    // Search State
-    @Published var searchMatches: [NSRange] = []
-    @Published var currentSearchIndex: Int = 0
-    
-    // Argument Structure State
-    @Published var pendingArgument: Bool = false
-    
-    // Internal Engine State
-    private var insertContext: InsertContext?
-    private var movePayloadType: TextUnitType?
-    @Published var currentDiffIndex: Int = 0
-    private var pendingG: Bool = false
-    
-    let undoStack = UndoStack()
-    let pendingChangeTracker = PendingChangeTracker()
-    private var lastCommand: LastCommand?
-    let analyzer = CachedTextAnalyzer()
+    @Published var panelRequest: PanelTab?
+    /// Set by `:rename` with no name; the view shows the rename prompt.
+    @Published var renameRequested = false
+    /// Set by `:export <format>`; the view shows the save panel.
+    @Published var exportRequest: ExportFormat?
+
+    var register: Register?
+
+    private enum Repeatable {
+        case operate(Operator, UnitKind, insertedText: String?)
+        case deleteCharacter
+    }
+    private var lastRepeatable: Repeatable?
+    private var changeStart: Int?             // where typing began after `c`, so `.` can replay it
+    private var helperInsertion: NSRange?     // space/line break added by a/o/O, removed if nothing is typed
+    private var lengthAtInsertEntry = 0
+    private var visualAnchor = 0
+    private var visualKind: UnitKind = .sentence
+    private var lastSearch = ""
+    private var cachedUnits: TextUnits?
     private var statsTimer: Timer?
-    
+
     init(document: Document) {
         self.document = document
-        if !document.drafts.isEmpty {
-            self.mode = .normal
+        self.mode = document.content.isEmpty ? .insert : .normal
+        self.snapshots = SnapshotScheduler(document: document)
+    }
+
+    var pendingOperator: Operator? {
+        if case .op(let op) = pending { return op }
+        return nil
+    }
+
+    // MARK: - Hooks from the view
+
+    /// Called from `makeNSView`, i.e. while SwiftUI is updating views. Nothing @Published
+    /// may change synchronously here, so the first stats count waits for the next turn.
+    func attach(_ buffer: TextBuffer) {
+        self.buffer = buffer
+        DispatchQueue.main.async { [weak self] in self?.refreshStats() }
+    }
+
+    func textDidChange() {
+        cachedUnits = nil
+        snapshots.textDidChange()
+        scheduleStats()
+    }
+
+    func selectionDidChange() {
+        if mode == .visual { updateVisualHighlight() }
+    }
+
+    func flushSnapshots() {
+        snapshots.flush()
+    }
+
+    // MARK: - Actions from the UI
+
+    func openReview() { activeSheet = .review }
+
+    func jump(to range: NSRange) {
+        leaveTransientModes()
+        cursor = range.location
+        buffer?.flash(range)
+        buffer?.revealCursor()
+    }
+
+    /// Replaces the text with a snapshot as a single undoable edit, after capturing the
+    /// current text as a safety snapshot (whatever the snapshot setting).
+    func restore(_ snapshot: Snapshot) {
+        leaveTransientModes()
+        document.takeSnapshot()
+        replace(NSRange(location: 0, length: text.utf16Length), with: snapshot.content, cursorAfter: 0)
+        message = "Restored “\(snapshot.displayName)” — press u to undo"
+    }
+
+    func saveSnapshot(name: String, note: String) {
+        if document.takeSnapshot(name: name, note: note) != nil {
+            message = "Saved snapshot “\(name)”"
         }
     }
-    
-    // MARK: - Core Updates
-    
-    func handleTextChange() {
-        analyzer.invalidate()
-        debouncedUpdateStats()
-        
+
+    func putInRegister(_ text: String) {
+        register = Register(text: text, kind: .sentence)
+        message = "In the register — press p to put it back"
+    }
+
+    // MARK: - Key dispatch
+
+    func handle(_ key: KeyInput) {
+        message = nil
         switch mode {
-        case .insert, .freeText:
-            document.scheduleWorkingDraftUpdate()
-        default: break
+        case .insert:
+            if key == .escape { exitInsert() }
+        case .normal:
+            handleNormal(key)
+        case .visual:
+            handleVisual(key)
+        case .command(let current):
+            handleCommandLine(key, current)
+        case .search(let current):
+            handleSearchLine(key, current)
         }
     }
-    
-    func handleModeChange(_ newMode: EditorMode) {
-        if case .insert = mode, !(newMode == mode) {
-            completeInsertMode()
-        }
-        mode = newMode
-        if case .normal = newMode {
-            insertContext = nil
-            pendingVerb = nil
-            highlightRange = nil
-        }
-    }
-    
-    private func debouncedUpdateStats() {
-        statsTimer?.invalidate()
-        statsTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
-            guard let self = self else { return }
-            DispatchQueue.main.async {
-                self.stats = self.analyzer.stats(for: self.document.currentContent)
-            }
-        }
-    }
-    
-    // MARK: - Key Dispatch
-    
-    func handleKeyPress(_ characters: String, modifiers: NSEvent.ModifierFlags) {
-        if modifiers.contains(.command) {
-            if characters == "d" && mode == .normal { enterCompMode(); return }
-            if characters == "s" && mode == .normal {
-                if document.currentBranchHead != nil { activeSheet = .save }
-                return
-            }
-            if characters == "z" && mode == .normal { executeUndo(); return }
+
+    private func handleNormal(_ key: KeyInput) {
+        switch pending {
+        case .op(let op):
+            pending = .none
+            guard case .char(let c) = key, let kind = Self.object(for: c) else { return }
+            operate(op, on: kind)
             return
-        }
-        
-        if modifiers.contains(.control) {
-            if characters == "r" && mode == .normal { executeRedo(); return }
+        case .g:
+            pending = .none
+            if key == .char("g") { cursor = 0; afterMotion(kind: nil) }
             return
+        case .none:
+            break
         }
-        
-        switch mode {
-        case .freeText:                handleFreeTextKey(characters)
-        case .normal:                  handleNormalKey(characters, modifiers: modifiers)
-        case .insert(let ctx):         handleInsertKey(characters, context: ctx)
-        case .visual:                  handleVisualKey(characters, modifiers: modifiers)
-        case .command(let cur):        handleCommandKey(characters, current: cur)
-        case .comp:                    handleCompKey(characters)
-        case .search(let cur):         handleSearchKey(characters, current: cur)
-        }
-    }
-    
-    // MARK: - Free Text Mode
-    
-    private func handleFreeTextKey(_ chars: String) {
-        if chars == "\u{1B}" && !document.currentContent.isEmpty {
-            activeSheet = .firstDraft
-        }
-    }
-    
-    // MARK: - Insert Mode
-    
-    private func handleInsertKey(_ chars: String, context: InsertContext) {
-        if chars == "\u{1B}" {
-            completeInsertMode()
-            return
-        }
-        
-        guard context != .freeform else { return }
-        
-        let nsText = document.currentContent as NSString
-        
-        switch context {
-        case .word:
-            if chars == " " {
-                scheduleAutoExit()
-            }
-            
-        case .sentence:
-            if chars == "." || chars == "!" || chars == "?" {
-                scheduleAutoExit()
-            }
-            
-        case .paragraph:
-            if chars == "\n" && cursorPosition > 0 && cursorPosition <= nsText.length {
-                let prevChar = nsText.substring(with: NSRange(location: cursorPosition - 1, length: 1))
-                if prevChar == "\n" {
-                    scheduleAutoExit()
-                }
-            }
-            
-        case .clause:
-            if chars == "," || chars == ";" || chars == ":" {
-                scheduleAutoExit()
-            } else if chars == " " {
-                let prevWord = getWordBeforeCursor()
-                let conjunctions: Set<String> = [
-                    "and", "but", "or", "so", "yet", "for", "nor",
-                    "although", "because", "since", "unless", "if", "while", "whereas"
-                ]
-                if conjunctions.contains(prevWord.lowercased()) {
-                    scheduleAutoExit()
-                }
-            }
-            
-        case .line:
-            if chars == "\n" {
-                scheduleAutoExit()
-            }
-            
+
+        switch key {
+        case .escape:
+            buffer?.setHighlight(nil)
+        case .ctrl("r"):
+            redo()
+        case .char(let c):
+            if performMotion(c) { return }
+            normalCommand(c)
         default:
             break
         }
     }
-    
-    private func scheduleAutoExit() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            self?.completeInsertMode()
-        }
-    }
-    
-    private func getWordBeforeCursor() -> String {
-        let nsText = document.currentContent as NSString
-        guard cursorPosition > 0 && cursorPosition <= nsText.length else { return "" }
-        
-        var pos = cursorPosition - 1
-        while pos >= 0 {
-            let char = nsText.substring(with: NSRange(location: pos, length: 1))
-            if char != " " && char != "\n" { break }
-            pos -= 1
-        }
-        let endPos = pos + 1
-        while pos >= 0 {
-            let char = nsText.substring(with: NSRange(location: pos, length: 1))
-            if char == " " || char == "\n" { break }
-            pos -= 1
-        }
-        let startPos = pos + 1
-        if endPos > startPos {
-            return nsText.substring(with: NSRange(location: startPos, length: endPos - startPos))
-        }
-        return ""
-    }
-    
-    private func completeInsertMode() {
-        if pendingChangeTracker.hasPending {
-            let capturedStartPos = pendingChangeTracker.insertStartPosition
-            
-            if let completed = pendingChangeTracker.completeChange(
-                currentContent: document.currentContent,
-                cursorPosition: cursorPosition
-            ) {
-                document.recordChange(completed)
-                
-                if let startPos = capturedStartPos {
-                    let length = cursorPosition - startPos
-                    if length > 0 {
-                        let nsText = document.currentContent as NSString
-                        let safeRange = TextAnalyzer.safeRange(NSRange(location: startPos, length: length), in: nsText.length)
-                        let insertedText = nsText.substring(with: safeRange)
-                        let operation = InsertOperation(position: startPos, insertedText: insertedText, semanticChange: completed)
-                        undoStack.push(operation)
-                    }
-                }
-            }
-        }
-        mode = .normal
-        insertContext = nil
-        pendingVerb = nil
-        highlightRange = nil
-        movePayload = nil
-        movePayloadType = nil
-    }
-    
-    // MARK: - Normal Mode
-    
-    private func handleNormalKey(_ chars: String, modifiers: NSEvent.ModifierFlags) {
-        guard let char = chars.first.map(String.init) else { return }
-        let isShift = modifiers.contains(.shift)
-        
-        if let payload = movePayload, let payloadType = movePayloadType {
-            handleMoveKey(char, payload: payload, payloadType: payloadType)
-            return
-        }
-        
-        if let verb = pendingVerb {
-            if char == "\u{1B}" {
-                pendingVerb = nil
-                highlightRange = nil
-                return
-            }
-            if let obj = parseObject(char.lowercased()) {
-                updateLiveHighlightForObject(verb: verb.verb, object: obj)
-            }
-            executeVerbObject(verb: verb.verb, objectKey: char.lowercased(), isShift: isShift)
-            pendingVerb = nil
-            highlightRange = nil
-            return
-        }
-        
-        // Handle G (Shift+g) — jump to bottom
-        if char == "G" && isShift {
-            pendingG = false
-            cursorPosition = (document.currentContent as NSString).length
-            flashCursor()
-            return
-        }
-        
-        // Handle gg (double-press) — jump to top
-        if char.lowercased() == "g" && !isShift {
-            if pendingG {
-                pendingG = false
-                cursorPosition = 0
-                flashCursor()
-            } else {
-                pendingG = true
-            }
-            return
-        }
-        
-        pendingG = false
-        
-        // Handle ' (argument structure prefix)
-        if char == "'" && !isShift {
-            if pendingArgument {
-                pendingArgument = false
-            } else {
-                pendingArgument = true
-            }
-            return
-        }
-        
-        if pendingArgument {
-            pendingArgument = false
-            if let argType = parseArgumentType(char.lowercased()) {
-                executeArgumentCommand(argType)
-                return
-            }
-        }
-        
-        switch char.lowercased() {
-        // Navigation — sentence-first
-        case "h": isShift ? navigateClause(forward: false) : navigateSentence(forward: false)
-        case "l": isShift ? navigateClause(forward: true) : navigateSentence(forward: true)
-        case "j": isShift ? navigateLine(forward: true) : navigateParagraph(forward: true)
-        case "k": isShift ? navigateLine(forward: false) : navigateParagraph(forward: false)
-        case "w": navigateWord(forward: true)
-        case "b": navigateWord(forward: false)
-            
-        // Verbs (updated: r=replace, c=cite)
-        case "d": isShift ? executeDeleteToEnd() : startPendingVerb(.delete)
-        case "r": isShift ? executeReplaceToEnd() : startPendingVerb(.replace)
-        case "c": isShift ? executeCiteToEnd() : startPendingVerb(.cite)
-        case "y": startPendingVerb(.yank)
-        case "m": startPendingVerb(.markup)
-        case "x": startPendingVerb(.move)
-            
-        // Direct actions
-        case "i": startInsert(context: .freeform)
-        case "a": executeAppendAfterSentence()
-        case "o": executeOpenLineBelow()
-        case "p": executePaste()
-        case "u": executeUndo()
-        case ".": repeatLastCommand()
-        case "v": enterVisualMode()
+
+    private func normalCommand(_ c: Character) {
+        switch c {
+        case "d", "c", "y", "m":
+            if let op = Operator(rawValue: c) { pending = .op(op) }
+        case "D": deleteToEndOfSentence(thenInsert: false)
+        case "C": deleteToEndOfSentence(thenInsert: true)
+        case "x": deleteCharacter()
+        case "i": enterInsert(at: cursor)
+        case "I": enterInsert(at: units.unit(.sentence, at: cursor)?.location ?? cursor)
+        case "a": appendAfterSentence()
+        case "A": enterInsert(at: units.unit(.paragraph, at: cursor)?.end ?? text.utf16Length)
+        case "o": openParagraph(below: true)
+        case "O": openParagraph(below: false)
+        case "p": put(after: true)
+        case "P": put(after: false)
+        case "u": undo()
+        case ".": repeatLast()
+        case "v": enterVisual()
         case ":": mode = .command("")
-        case "/": enterSearchMode()
-            
-        // Search navigation
-        case "n": isShift ? navigateSearchResult(forward: false) : navigateSearchResult(forward: true)
-            
+        case "/": mode = .search("")
         default: break
         }
     }
-    
-    // MARK: - Verbs & Objects
-    
-    private func startPendingVerb(_ verb: EditVerb) {
-        pendingVerb = PendingVerb(verb)
-        if let sentence = analyzer.sentenceAt(cursorPosition, in: document.currentContent) {
-            highlightRange = sentence.range
-        }
-    }
-    
-    private func updateLiveHighlightForObject(verb: EditVerb, object: EditObject) {
-        if let unit = resolveUnit(for: object) {
-            highlightRange = unit.range
-        }
-    }
-    
-    private func executeVerbObject(verb: EditVerb, objectKey: String, isShift: Bool) {
-        guard let object = parseObject(objectKey),
-              let unit = resolveUnit(for: object) else { return }
-        
-        lastCommand = LastCommand(verb: verb, object: object, insertedText: nil)
-        let unitType = objectTextUnitType(object)
-        
-        switch verb {
-        case .delete:  executeDelete(unit: unit, unitType: unitType)
-        case .replace: executeReplace(unit: unit, unitType: unitType, object: object)
-        case .cite:    executeCite(unit: unit, unitType: unitType)
-        case .yank:    executeYank(unit: unit, unitType: unitType)
-        case .markup:  executeMarkup(unit: unit, unitType: unitType)
-        case .move:    startMove(unit: unit, unitType: unitType)
-        }
-    }
-    
-    // MARK: - Core Operations
-    
-    private func executeDelete(unit: TextUnit, unitType: TextUnitType) {
-        let range = unitType == .word ? TextAnalyzer.expandToTrailingSpace(unit.range, in: document.currentContent) : unit.range
-        let change = SemanticChange(type: .deleted, unitType: unitType, beforeText: unit.text, position: cursorPosition, context: "deleted \(unitType.rawValue)")
-        
-        highlightRangeBriefly(range) { self.performDelete(range: range, change: change) }
-    }
-    
-    /// Unified replace: deletes the unit and enters insert mode to type the replacement
-    private func executeReplace(unit: TextUnit, unitType: TextUnitType, object: EditObject) {
-        let range = unitType == .word ? TextAnalyzer.expandToTrailingSpace(unit.range, in: document.currentContent) : unit.range
-        let ctx = objectInsertContext(object)
-        
-        pendingChangeTracker.startChange(type: .replaced, unitType: unitType, beforeText: unit.text, position: range.location, context: "replaced \(unitType.rawValue)")
-        
-        highlightRangeBriefly(range) {
-            self.performDelete(range: range, change: nil)
-            self.mode = .insert(ctx)
-            self.insertContext = ctx
-        }
-    }
-    
-    /// Cite: flash the text unit and open a citation sheet; marker will be inserted at the end of the unit
-    private func executeCite(unit: TextUnit, unitType: TextUnitType) {
-        flashUnit(unit)
-        activeSheet = .citation(anchorText: unit.text, insertPosition: unit.endLocation)
-    }
-    
-    private func executeYank(unit: TextUnit, unitType: TextUnitType) {
-        document.yankRegister = unit.text
-        flashUnit(unit)
-    }
-    
-    private func executeMarkup(unit: TextUnit, unitType: TextUnitType) {
-        flashUnit(unit)
-        activeSheet = .annotation(anchorText: unit.text, position: unit.range.location)
-    }
-    
-    // MARK: - Move Engine
-    
-    private func startMove(unit: TextUnit, unitType: TextUnitType) {
-        movePayload = unit
-        movePayloadType = unitType
-        flashUnit(unit)
-    }
-    
-    private func handleMoveKey(_ char: String, payload: TextUnit, payloadType: TextUnitType) {
-        switch char {
-        case "j": navigateParagraph(forward: true)
-        case "k": navigateParagraph(forward: false)
-        case "\r", "\n": confirmMove(payload: payload, payloadType: payloadType)
-        case "\u{1B}": movePayload = nil; movePayloadType = nil
-        default: break
-        }
-    }
-    
-    private func confirmMove(payload: TextUnit, payloadType: TextUnitType) {
-        let dest = cursorPosition
-        let change = SemanticChange(type: .moved, unitType: payloadType, beforeText: payload.text, position: payload.range.location, context: "moved to \(dest)")
-        let operation = MoveOperation(sourceRange: payload.range, movedText: payload.text, destinationPosition: dest, cursorBefore: payload.range.location, semanticChange: change)
-        
-        var content = document.currentContent
-        let _ = operation.redo(content: &content)
-        document.currentContent = content
-        
-        undoStack.push(operation)
-        document.recordChange(change)
-        
-        movePayload = nil
-        movePayloadType = nil
-        handleTextChange()
-    }
-    
-    // MARK: - Shift Actions & Direct Actions
-    
-    private func executeDeleteToEnd() {
-        guard let rest = TextAnalyzer.getRestOfSentence(from: cursorPosition, in: document.currentContent) else { return }
-        let change = SemanticChange(type: .deleted, unitType: .sentence, beforeText: rest.text, position: cursorPosition, context: "deleted to end")
-        highlightRangeBriefly(rest.range) { self.performDelete(range: rest.range, change: change) }
-    }
-    
-    private func executeReplaceToEnd() {
-        guard let rest = TextAnalyzer.getRestOfSentence(from: cursorPosition, in: document.currentContent) else { return }
-        pendingChangeTracker.startChange(type: .replaced, unitType: .sentence, beforeText: rest.text, position: rest.range.location, context: "replace to end")
-        highlightRangeBriefly(rest.range) {
-            self.performDelete(range: rest.range, change: nil)
-            self.mode = .insert(.sentence)
-            self.insertContext = .sentence
-        }
-    }
-    
-    /// C (shift-c): cite the rest of the current sentence
-    private func executeCiteToEnd() {
-        guard let rest = TextAnalyzer.getRestOfSentence(from: cursorPosition, in: document.currentContent) else { return }
-        flashRange = rest.range
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { self.flashRange = nil }
-        activeSheet = .citation(anchorText: rest.text, insertPosition: rest.endLocation)
-    }
-    
-    private func startInsert(context: InsertContext) {
-        let unitType = insertContextToUnitType(context)
-        pendingChangeTracker.startChange(type: .added, unitType: unitType, beforeText: nil, position: cursorPosition, context: "insert \(context.displayName)")
-        mode = .insert(context)
-        insertContext = context
-        pendingVerb = nil
-        highlightRange = nil
-    }
-    
-    private func insertContextToUnitType(_ context: InsertContext) -> TextUnitType {
-        switch context {
-        case .word:      return .word
-        case .clause:    return .clause
-        case .sentence:  return .sentence
-        case .paragraph: return .paragraph
-        case .line:      return .sentence
-        case .freeform:  return .sentence
-        }
-    }
-    
-    private func executeAppendAfterSentence() {
-        if let sentence = analyzer.sentenceAt(cursorPosition, in: document.currentContent) {
-            cursorPosition = sentence.endLocation
-        }
-        startInsert(context: .sentence)
-    }
-    
-    private func executeOpenLineBelow() {
-        let nsText = document.currentContent as NSString
-        let range = NSRange(location: cursorPosition, length: nsText.length - cursorPosition)
-        let nextNewline = nsText.range(of: "\n", options: [], range: range)
-        let insertPos = nextNewline.location != NSNotFound ? nextNewline.location + 1 : nsText.length
-        
-        document.currentContent = nsText.replacingCharacters(in: NSRange(location: insertPos, length: 0), with: "\n")
-        cursorPosition = insertPos + 1
-        startInsert(context: .line)
-        handleTextChange()
-    }
-    
-    private func executePaste() {
-        guard let yanked = document.yankRegister, !yanked.isEmpty else { return }
-        let nsText = document.currentContent as NSString
-        let insertPos = min(cursorPosition, nsText.length)
-        
-        let change = SemanticChange(type: .added, unitType: .sentence, afterText: yanked, position: insertPos, context: "pasted")
-        let operation = InsertOperation(position: insertPos, insertedText: yanked, semanticChange: change)
-        
-        document.currentContent = nsText.replacingCharacters(in: NSRange(location: insertPos, length: 0), with: yanked)
-        cursorPosition = insertPos + yanked.count
-        
-        undoStack.push(operation)
-        document.recordChange(change)
-        handleTextChange()
-    }
-    
-    private func executeUndo() {
-        if let result = undoStack.undo(content: &document.currentContent) {
-            cursorPosition = result.cursor
-            if let change = result.change { document.removeLastChange(matching: change) }
-            handleTextChange()
-        }
-    }
-    
-    private func executeRedo() {
-        if let result = undoStack.redo(content: &document.currentContent) {
-            cursorPosition = result.cursor
-            if let change = result.change { document.reAddChange(change) }
-            handleTextChange()
-        }
-    }
-    
-    private func repeatLastCommand() {
-        guard let last = lastCommand, let obj = last.object, let _ = resolveUnit(for: obj) else { return }
-        executeVerbObject(verb: last.verb, objectKey: obj.rawValue, isShift: false)
-    }
-    
-    // MARK: - Visual Mode
-    
-    private func enterVisualMode() {
-        selectionRange = NSRange(location: cursorPosition, length: 0)
-        mode = .visual(.character)
-    }
-    
-    private func handleVisualKey(_ chars: String, modifiers: NSEvent.ModifierFlags) {
-        guard let char = chars.first.map({ String($0).lowercased() }) else { return }
-        if char == "\u{1B}" { selectionRange = nil; mode = .normal; return }
-    }
-    
-    // MARK: - Command Mode
-    
-    private func handleCommandKey(_ chars: String, current: String) {
-        guard let char = chars.first else { return }
-        if char == "\u{1B}" { mode = .normal; return }
-        if char == "\r" || char == "\n" { executeCommand(current); return }
-        if char == "\u{7F}" {
-            mode = current.isEmpty ? .normal : .command(String(current.dropLast()))
-            return
-        }
-        mode = .command(current + String(char))
-    }
-    
-    private func executeCommand(_ cmd: String) {
-        let trimmed = cmd.trimmingCharacters(in: .whitespaces).lowercased()
-        switch trimmed {
-        case "comp", "diff": enterCompMode()
-        case "save", "commit": if document.currentBranchHead != nil { activeSheet = .save }; mode = .normal
-        case "branch", "branches": activeSheet = .branch; mode = .normal
-        case "merge": activeSheet = .merge; mode = .normal
-        case "log", "history": activeSheet = .log; mode = .normal
-        case "help", "?": activeSheet = .help; mode = .normal
-        // Argument structure commands via command mode
-        case "ie", "evidence": executeArgumentCommand(.evidence)
-        case "ic", "counter", "counterargument": executeArgumentCommand(.counterargument)
-        case "ir", "rebuttal": executeArgumentCommand(.rebuttal)
-        case "ab", "bridge": executeArgumentCommand(.bridge)
-        case "at", "transition": executeArgumentCommand(.transition)
-        default: mode = .normal
-        }
-    }
-    
-    // MARK: - Compare Mode
-    
-    private func enterCompMode() {
-        guard let headDraft = document.currentBranchHead else { mode = .normal; return }
-        diffChanges = DiffGenerator.generateDiff(from: headDraft.content, to: document.currentContent, withChanges: document.sessionChanges)
-        let changeIndices = DiffGenerator.getChangeIndices(in: diffChanges)
-        if changeIndices.isEmpty {
-            // No changes detected — stay in normal mode
-            diffChanges = []
-            mode = .normal
-            return
-        }
-        currentDiffIndex = changeIndices.first ?? 0
-        mode = .comp
-        navigateToCurrentDiffChange()
-    }
-    
-    private func handleCompKey(_ chars: String) {
-        guard let char = chars.first else { return }
-        switch char {
-        case "\u{1B}": diffChanges = []; mode = .normal
-        case "n":
-            if let next = DiffGenerator.findNextChange(from: currentDiffIndex, in: diffChanges) {
-                currentDiffIndex = next; navigateToCurrentDiffChange()
-            }
-        case "p":
-            if let prev = DiffGenerator.findPreviousChange(from: currentDiffIndex, in: diffChanges) {
-                currentDiffIndex = prev; navigateToCurrentDiffChange()
-            }
-        default: break
-        }
-    }
-    
-    private func navigateToCurrentDiffChange() {
-        guard currentDiffIndex < diffChanges.count else { return }
-        let c = diffChanges[currentDiffIndex]
-        cursorPosition = (c.type == .deletion ? c.displayRange?.location : c.range.location) ?? 0
-    }
-    
-    // MARK: - Search Mode
-    
-    private func enterSearchMode() {
-        searchMatches = []
-        currentSearchIndex = 0
-        mode = .search("")
-    }
-    
-    private func handleSearchKey(_ chars: String, current: String) {
-        guard let char = chars.first else { return }
-        if char == "\u{1B}" {
-            searchMatches = []
-            highlightRange = nil
-            mode = .normal
-            return
-        }
-        if char == "\r" || char == "\n" {
-            if !searchMatches.isEmpty {
-                let match = searchMatches[currentSearchIndex]
-                cursorPosition = match.location
-                highlightRange = match
-            }
-            mode = .normal
-            return
-        }
-        if char == "\u{7F}" {
-            let newQuery = current.isEmpty ? "" : String(current.dropLast())
-            mode = .search(newQuery)
-            updateSearchResults(for: newQuery)
-            return
-        }
-        let newQuery = current + String(char)
-        mode = .search(newQuery)
-        updateSearchResults(for: newQuery)
-    }
-    
-    private func updateSearchResults(for query: String) {
-        guard !query.isEmpty else {
-            searchMatches = []
-            highlightRange = nil
-            return
-        }
-        let nsContent = document.currentContent as NSString
-        var matches: [NSRange] = []
-        var searchRange = NSRange(location: 0, length: nsContent.length)
-        
-        while searchRange.location < nsContent.length {
-            let found = nsContent.range(of: query, options: .caseInsensitive, range: searchRange)
-            guard found.location != NSNotFound else { break }
-            matches.append(found)
-            searchRange.location = found.location + found.length
-            searchRange.length = nsContent.length - searchRange.location
-        }
-        
-        searchMatches = matches
-        
-        if let nearestIdx = matches.firstIndex(where: { $0.location >= cursorPosition }) {
-            currentSearchIndex = nearestIdx
-        } else if !matches.isEmpty {
-            currentSearchIndex = 0
-        }
-        
-        if !matches.isEmpty && currentSearchIndex < matches.count {
-            let match = matches[currentSearchIndex]
-            cursorPosition = match.location
-            highlightRange = match
-        } else {
-            highlightRange = nil
-        }
-    }
-    
-    private func navigateSearchResult(forward: Bool) {
-        guard !searchMatches.isEmpty else { return }
-        if forward {
-            currentSearchIndex = (currentSearchIndex + 1) % searchMatches.count
-        } else {
-            currentSearchIndex = (currentSearchIndex - 1 + searchMatches.count) % searchMatches.count
-        }
-        let match = searchMatches[currentSearchIndex]
-        cursorPosition = match.location
-        highlightRange = match
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            if self?.highlightRange == match { self?.highlightRange = nil }
-        }
-    }
-    
-    // MARK: - Argument Structure Commands
-    
-    private func parseArgumentType(_ key: String) -> ArgumentType? {
-        switch key {
-        case "e": return .evidence
-        case "c": return .counterargument
-        case "r": return .rebuttal
-        case "b": return .bridge
-        case "t": return .transition
-        default: return nil
-        }
-    }
-    
-    private func executeArgumentCommand(_ argType: ArgumentType) {
-        let nsText = document.currentContent as NSString
-        
-        let insertPos: Int
-        switch argType {
-        case .evidence, .counterargument, .rebuttal:
-            if let sentence = analyzer.sentenceAt(cursorPosition, in: document.currentContent) {
-                insertPos = sentence.endLocation
-            } else {
-                insertPos = min(cursorPosition, nsText.length)
-            }
-        case .bridge:
-            let paras = analyzer.paragraphs(in: document.currentContent)
-            if let currentPara = paras.first(where: { NSLocationInRange(cursorPosition, $0.range) }) {
-                insertPos = currentPara.endLocation
-            } else {
-                insertPos = min(cursorPosition, nsText.length)
-            }
-        case .transition:
-            if let sentence = analyzer.sentenceAt(cursorPosition, in: document.currentContent) {
-                insertPos = sentence.range.location
-            } else {
-                insertPos = min(cursorPosition, nsText.length)
-            }
-        }
-        
-        let prefix = argType.promptPrefix
-        let separator = (argType == .bridge) ? "\n\n" : " "
-        let insertText = separator + prefix
-        
-        document.currentContent = nsText.replacingCharacters(
-            in: NSRange(location: insertPos, length: 0),
-            with: insertText
-        )
-        cursorPosition = insertPos + insertText.count
-        
-        pendingChangeTracker.startChange(
-            type: .added,
-            unitType: .sentence,
-            beforeText: nil,
-            position: insertPos,
-            context: argType.context
-        )
-        
-        mode = .insert(.sentence)
-        insertContext = .sentence
-        pendingVerb = nil
-        highlightRange = nil
-        handleTextChange()
-    }
-    
-    // MARK: - Annotation Navigation
-    
-    func navigateToPosition(_ position: Int) {
-        let text = document.currentContent
-        cursorPosition = TextAnalyzer.safePosition(position, in: text)
-        if let sentence = analyzer.sentenceAt(cursorPosition, in: text) {
-            highlightRange = sentence.range
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                if self?.highlightRange == sentence.range { self?.highlightRange = nil }
-            }
-        }
-    }
-    
-    // MARK: - Navigation Utilities
-    
-    private func navigateWord(forward: Bool) {
-        let text = document.currentContent
-        if forward {
-            cursorPosition = analyzer.nextWord(from: cursorPosition, in: text)?.range.location ?? (text as NSString).length
-        } else {
-            cursorPosition = analyzer.prevWord(from: cursorPosition, in: text)?.range.location ?? 0
-        }
-        flashCursor()
-    }
-    
-    private func navigateClause(forward: Bool) {
-        let clauses = analyzer.clauses(in: document.currentContent)
-        if forward {
-            if let next = clauses.first(where: { $0.range.location > cursorPosition }) { cursorPosition = next.range.location }
-        } else {
-            if let prev = clauses.last(where: { $0.range.location < cursorPosition }) { cursorPosition = prev.range.location }
-        }
-        flashCursor()
-    }
-    
-    private func navigateSentence(forward: Bool) {
-        let text = document.currentContent
-        if forward {
-            if let next = analyzer.nextSentence(from: cursorPosition, in: text) { cursorPosition = next.range.location }
-        } else {
-            if let prev = analyzer.prevSentence(from: cursorPosition, in: text) { cursorPosition = prev.range.location }
-        }
-        flashCursor()
-    }
-    
-    // FIX 1: Paragraph navigation now uses the NLP-based paragraph list
-    // instead of raw \n\n searching. This correctly handles edge cases where
-    // the cursor sits at a paragraph boundary.
-    private func navigateParagraph(forward: Bool) {
-        let text = document.currentContent
-        let paragraphs = analyzer.paragraphs(in: text)
-        guard !paragraphs.isEmpty else { return }
-        
-        if forward {
-            // Find the first paragraph whose start is strictly after the cursor
-            if let next = paragraphs.first(where: { $0.range.location > cursorPosition }) {
-                cursorPosition = next.range.location
-            } else {
-                // Already in/past the last paragraph — go to end
-                cursorPosition = (text as NSString).length
-            }
-        } else {
-            // Find the current paragraph (the one containing the cursor)
-            let currentParaIndex = paragraphs.lastIndex(where: { $0.range.location <= cursorPosition })
-            
-            if let idx = currentParaIndex {
-                if paragraphs[idx].range.location < cursorPosition {
-                    // Cursor is in the middle of this paragraph — jump to its start
-                    cursorPosition = paragraphs[idx].range.location
-                } else if idx > 0 {
-                    // Cursor is at the start of this paragraph — jump to previous
-                    cursorPosition = paragraphs[idx - 1].range.location
-                } else {
-                    // Already at the first paragraph — go to 0
-                    cursorPosition = 0
-                }
-            } else {
-                cursorPosition = 0
-            }
-        }
-        flashCursor()
-    }
-    
-    private func navigateLine(forward: Bool) {
-        cursorPosition = forward ? TextAnalyzer.getNextLineStart(from: cursorPosition, in: document.currentContent)
-                                 : TextAnalyzer.getPreviousLineStart(from: cursorPosition, in: document.currentContent)
-        flashCursor()
-    }
-    
-    // MARK: - Unit Helpers
-    
-    private func performDelete(range: NSRange, change: SemanticChange?) {
-        let nsText = document.currentContent as NSString
-        let safeRange = TextAnalyzer.safeRange(range, in: nsText.length)
-        guard safeRange.length > 0 else { return }
-        
-        let deletedText = nsText.substring(with: safeRange)
-        let afterContent = nsText.replacingCharacters(in: safeRange, with: "")
-        
-        let operation = DeleteOperation(range: safeRange, deletedText: deletedText, cursorBefore: cursorPosition, semanticChange: change)
-        undoStack.push(operation)
-        
-        document.currentContent = afterContent
-        cursorPosition = safeRange.location
-        if let change = change { document.recordChange(change) }
-        handleTextChange()
-    }
-    
-    private func highlightRangeBriefly(_ range: NSRange, completion: @escaping () -> Void) {
-        highlightRange = range
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            self.highlightRange = nil
-            completion()
-        }
-    }
-    
-    private func flashUnit(_ unit: TextUnit) {
-        flashRange = unit.range
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { self.flashRange = nil }
-    }
-    
-    private func flashCursor() {
-        let text = document.currentContent
-        guard !text.isEmpty else { return }
-        let loc = TextAnalyzer.safePosition(cursorPosition, in: text)
-        flashRange = NSRange(location: loc, length: loc < (text as NSString).length ? 1 : 0)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { self.flashRange = nil }
-    }
-    
-    private func parseObject(_ key: String) -> EditObject? {
-        switch key {
+
+    static func object(for c: Character) -> UnitKind? {
+        switch c {
         case "w": return .word
-        case "b": return .wordBack
         case "c": return .clause
         case "s": return .sentence
         case "p": return .paragraph
         default: return nil
         }
     }
-    
-    private func resolveUnit(for object: EditObject) -> TextUnit? {
-        let text = document.currentContent
-        let pos = cursorPosition
-        switch object {
-        case .word: return analyzer.wordAt(pos, in: text)
-        case .wordBack: return analyzer.prevWord(from: pos, in: text)
-        case .clause: return analyzer.clauseAt(pos, in: text)
-        case .sentence: return analyzer.sentenceAt(pos, in: text)
-        case .paragraph: return analyzer.paragraphAt(pos, in: text)
+
+    // MARK: - Motions
+
+    /// Returns true if `c` is a motion key (whether or not there was anywhere to go).
+    private func performMotion(_ c: Character) -> Bool {
+        let u = units, position = cursor
+        var target: Int?
+        var kind: UnitKind?
+        switch c {
+        case "l": kind = .sentence; target = u.nextStart(.sentence, after: position)
+        case "h": kind = .sentence; target = u.previousStart(.sentence, before: position)
+        case "L": kind = .clause; target = u.nextStart(.clause, after: position)
+        case "H": kind = .clause; target = u.previousStart(.clause, before: position)
+        case "j": kind = .paragraph; target = u.nextStart(.paragraph, after: position)
+        case "k": kind = .paragraph; target = u.previousStart(.paragraph, before: position)
+        case "w": kind = .word; target = u.nextStart(.word, after: position)
+        case "b": kind = .word; target = u.previousStart(.word, before: position)
+        case "J", "K":
+            buffer?.moveVisualLine(down: c == "J")
+            afterMotion(kind: nil)
+            return true
+        case "G": target = text.utf16Length
+        case "g": pending = .g; return true
+        case "]": target = noteStart(forward: true)
+        case "[": target = noteStart(forward: false)
+        case "n": target = searchMatch(forward: true)
+        case "N": target = searchMatch(forward: false)
+        default: return false
+        }
+        if let target = target { cursor = target }
+        afterMotion(kind: kind)
+        return true
+    }
+
+    private func afterMotion(kind: UnitKind?) {
+        if mode == .visual {
+            if let kind = kind { visualKind = kind }
+            updateVisualHighlight()
+        }
+        buffer?.revealCursor()
+    }
+
+    private func noteStart(forward: Bool) -> Int? {
+        let starts = document.notes.filter { !$0.resolved && !$0.isDetached }.map(\.location).sorted()
+        let position = cursor
+        let target = forward ? starts.first(where: { $0 > position }) : starts.last(where: { $0 < position })
+        if target == nil { message = forward ? "No more notes below" : "No more notes above" }
+        return target
+    }
+
+    // MARK: - Operators
+
+    private func operate(_ op: Operator, on kind: UnitKind, insertedText: String? = nil) {
+        guard let unit = units.unit(kind, at: cursor) else { return }
+        apply(op, to: unit.range, text: unit.text, kind: kind, insertedText: insertedText)
+    }
+
+    private func apply(_ op: Operator, to range: NSRange, text unitText: String, kind: UnitKind,
+                       insertedText: String? = nil) {
+        switch op {
+        case .delete:
+            register = Register(text: unitText, kind: kind)
+            let removal = units.deletionRange(for: range, kind: kind)
+            replace(removal, with: "", cursorAfter: removal.location)
+            lastRepeatable = .operate(.delete, kind, insertedText: nil)
+
+        case .change:
+            register = Register(text: unitText, kind: kind)
+            if let replacement = insertedText {
+                replace(range, with: replacement, cursorAfter: range.location + replacement.utf16Length)
+                lastRepeatable = .operate(.change, kind, insertedText: replacement)
+            } else {
+                replace(range, with: "", cursorAfter: range.location)
+                lastRepeatable = .operate(.change, kind, insertedText: nil)
+                enterInsert(at: range.location)
+                changeStart = range.location
+            }
+
+        case .yank:
+            register = Register(text: unitText, kind: kind)
+            buffer?.flash(range)
+            message = "Yanked \(kind.rawValue)"
+
+        case .note:
+            activeSheet = .note(range: range, anchor: unitText)
         }
     }
-    
-    private func objectTextUnitType(_ object: EditObject) -> TextUnitType {
-        switch object {
-        case .word, .wordBack: return .word
-        case .clause: return .clause
-        case .sentence: return .sentence
-        case .paragraph: return .paragraph
+
+    private func deleteToEndOfSentence(thenInsert: Bool) {
+        guard let rest = units.restOfSentence(from: cursor) else { return }
+        register = Register(text: substring(rest), kind: .clause)
+        replace(rest, with: "", cursorAfter: rest.location)
+        if thenInsert { enterInsert(at: rest.location) }
+    }
+
+    private func deleteCharacter() {
+        let ns = text as NSString
+        guard cursor < ns.length else { return }
+        let range = ns.rangeOfComposedCharacterSequence(at: cursor)
+        replace(range, with: "", cursorAfter: range.location)
+        lastRepeatable = .deleteCharacter
+    }
+
+    /// Puts the register back as a whole unit: a sentence goes after (or before) the
+    /// current sentence, a paragraph after the current paragraph, with spacing added.
+    private func put(after: Bool) {
+        guard let reg = register, !reg.text.isEmpty else { message = "Nothing yanked yet"; return }
+        let u = units
+        let location: Int, insertion: String, start: Int
+        if let anchor = u.unit(reg.kind, at: cursor) {
+            let separator = reg.kind == .paragraph ? u.paragraphSeparator : " "
+            if after {
+                location = anchor.end
+                insertion = separator + reg.text
+                start = location + separator.utf16Length
+            } else {
+                location = anchor.location
+                insertion = reg.text + separator
+                start = location
+            }
+        } else {
+            location = cursor
+            insertion = reg.text
+            start = location
+        }
+        replace(NSRange(location: location, length: 0), with: insertion, cursorAfter: start)
+        buffer?.flash(NSRange(location: start, length: reg.text.utf16Length))
+    }
+
+    private func repeatLast() {
+        switch lastRepeatable {
+        case .operate(let op, let kind, let inserted)?:
+            operate(op, on: kind, insertedText: inserted)
+        case .deleteCharacter?:
+            deleteCharacter()
+        case nil:
+            break
         }
     }
-    
-    private func objectInsertContext(_ object: EditObject) -> InsertContext {
-        switch object {
-        case .word, .wordBack: return .word
-        case .clause: return .clause
-        case .sentence: return .sentence
-        case .paragraph: return .paragraph
+
+    private func undo() {
+        buffer?.undoEdit()
+        cachedUnits = nil
+    }
+
+    private func redo() {
+        buffer?.redoEdit()
+        cachedUnits = nil
+    }
+
+    // MARK: - Insert
+
+    private func enterInsert(at position: Int, helper: NSRange? = nil) {
+        buffer?.setHighlight(nil)
+        cursor = position
+        helperInsertion = helper
+        lengthAtInsertEntry = text.utf16Length
+        mode = .insert
+    }
+
+    private func exitInsert() {
+        buffer?.endTyping()
+        if text.utf16Length == lengthAtInsertEntry, let helper = helperInsertion {
+            replace(helper, with: "", cursorAfter: helper.location)
         }
+        if let start = changeStart, case .operate(let op, let kind, _)? = lastRepeatable {
+            let end = cursor
+            let typed = end > start ? substring(NSRange(location: start, length: end - start)) : nil
+            lastRepeatable = .operate(op, kind, insertedText: typed)
+        }
+        changeStart = nil
+        helperInsertion = nil
+        mode = .normal
+    }
+
+    /// `a`: start a new sentence after the current one.
+    private func appendAfterSentence() {
+        guard let sentence = units.unit(.sentence, at: cursor) else {
+            enterInsert(at: text.utf16Length)
+            return
+        }
+        let space = NSRange(location: sentence.end, length: 1)
+        replace(NSRange(location: sentence.end, length: 0), with: " ", cursorAfter: sentence.end + 1)
+        enterInsert(at: sentence.end + 1, helper: space)
+    }
+
+    /// `o` / `O`: start a new paragraph below or above the current one.
+    private func openParagraph(below: Bool) {
+        let u = units
+        guard let paragraph = u.unit(.paragraph, at: cursor) else {
+            enterInsert(at: text.utf16Length)
+            return
+        }
+        let separator = u.paragraphSeparator
+        let length = separator.utf16Length
+        if below {
+            replace(NSRange(location: paragraph.end, length: 0), with: separator)
+            enterInsert(at: paragraph.end + length, helper: NSRange(location: paragraph.end, length: length))
+        } else {
+            replace(NSRange(location: paragraph.location, length: 0), with: separator)
+            enterInsert(at: paragraph.location, helper: NSRange(location: paragraph.location, length: length))
+        }
+    }
+
+    // MARK: - Visual
+
+    private func enterVisual() {
+        visualAnchor = cursor
+        visualKind = .sentence
+        mode = .visual
+        updateVisualHighlight()
+    }
+
+    private func exitVisual() {
+        mode = .normal
+        buffer?.setHighlight(nil)
+    }
+
+    /// Whole units of the most recent motion's kind, from the anchor to the cursor.
+    private var visualRange: NSRange? {
+        let u = units
+        let low = min(visualAnchor, cursor), high = max(visualAnchor, cursor)
+        guard let first = u.unit(visualKind, at: low), let last = u.unit(visualKind, at: high) else { return nil }
+        let start = min(first.location, last.location)
+        let end = max(first.end, last.end)
+        return NSRange(location: start, length: end - start)
+    }
+
+    private func updateVisualHighlight() {
+        buffer?.setHighlight(visualRange)
+    }
+
+    private func handleVisual(_ key: KeyInput) {
+        if pending == .g {
+            pending = .none
+            if key == .char("g") { cursor = 0; afterMotion(kind: nil) }
+            return
+        }
+        switch key {
+        case .escape:
+            exitVisual()
+        case .char(let c):
+            if c == "v" { exitVisual(); return }
+            let op: Operator? = (c == "x") ? .delete : Operator(rawValue: c)
+            if let op = op {
+                guard let range = visualRange else { exitVisual(); return }
+                let kind = visualKind
+                let selected = substring(range)
+                exitVisual()
+                cursor = range.location
+                apply(op, to: range, text: selected, kind: kind)
+                return
+            }
+            _ = performMotion(c)
+        default:
+            break
+        }
+    }
+
+    // MARK: - Command line
+
+    private func handleCommandLine(_ key: KeyInput, _ current: String) {
+        switch key {
+        case .escape: mode = .normal
+        case .enter:
+            mode = .normal
+            run(command: current)
+        case .backspace: mode = current.isEmpty ? .normal : .command(String(current.dropLast()))
+        case .char(let c): mode = .command(current + String(c))
+        case .ctrl: break
+        }
+    }
+
+    func run(command raw: String) {
+        let parts = raw.trimmingCharacters(in: .whitespaces).split(separator: " ", maxSplits: 1).map(String.init)
+        guard let name = parts.first?.lowercased() else { return }
+        let argument = parts.count > 1 ? parts[1] : nil
+        switch name {
+        case "w", "save", "snap", "snapshot":
+            if let snapshotName = argument {
+                saveSnapshot(name: snapshotName, note: "")
+            } else {
+                activeSheet = .review
+            }
+        case "review", "changes", "diff": activeSheet = .review
+        case "history", "log": panelRequest = .history
+        case "darlings", "cuts": panelRequest = .darlings
+        case "notes": panelRequest = .notes
+        case "help", "h", "?": activeSheet = .help
+        case "rename", "title":
+            if let title = argument?.trimmingCharacters(in: .whitespaces), !title.isEmpty {
+                document.title = title
+                message = "Renamed to “\(title)”"
+            } else {
+                renameRequested = true
+            }
+        case "export":
+            if let format = argument.flatMap(ExportFormat.init(command:)) {
+                exportRequest = format
+            } else {
+                message = "Usage: :export txt | md | pdf | archive"
+            }
+        default: message = "Unknown command :\(name)"
+        }
+    }
+
+    // MARK: - Search
+
+    private func handleSearchLine(_ key: KeyInput, _ current: String) {
+        switch key {
+        case .escape:
+            mode = .normal
+            buffer?.setHighlight(nil)
+        case .enter:
+            mode = .normal
+            buffer?.setHighlight(nil)
+            guard !current.isEmpty else { return }
+            lastSearch = current
+            let matches = searchMatches(current)
+            let position = cursor
+            if let match = matches.first(where: { $0.location >= position }) ?? matches.first {
+                cursor = match.location
+                buffer?.flash(match)
+                buffer?.revealCursor()
+            } else {
+                message = "Not found: \(current)"
+            }
+        case .backspace:
+            if current.isEmpty {
+                mode = .normal
+                buffer?.setHighlight(nil)
+            } else {
+                let query = String(current.dropLast())
+                mode = .search(query)
+                previewSearch(query)
+            }
+        case .char(let c):
+            let query = current + String(c)
+            mode = .search(query)
+            previewSearch(query)
+        case .ctrl:
+            break
+        }
+    }
+
+    private func previewSearch(_ query: String) {
+        let matches = searchMatches(query)
+        searchMatchCount = matches.count
+        let position = cursor
+        buffer?.setHighlight(matches.first(where: { $0.location >= position }) ?? matches.first)
+    }
+
+    private func searchMatches(_ query: String) -> [NSRange] {
+        guard !query.isEmpty else { return [] }
+        let ns = text as NSString
+        var matches: [NSRange] = []
+        var start = 0
+        while start < ns.length {
+            let found = ns.range(of: query, options: .caseInsensitive,
+                                 range: NSRange(location: start, length: ns.length - start))
+            if found.location == NSNotFound { break }
+            matches.append(found)
+            start = found.location + max(found.length, 1)
+        }
+        return matches
+    }
+
+    private func searchMatch(forward: Bool) -> Int? {
+        let matches = searchMatches(lastSearch)
+        guard !matches.isEmpty else {
+            message = lastSearch.isEmpty ? "No search yet — press / to search" : "Not found: \(lastSearch)"
+            return nil
+        }
+        let position = cursor
+        let match = forward
+            ? (matches.first(where: { $0.location > position }) ?? matches[0])
+            : (matches.last(where: { $0.location < position }) ?? matches[matches.count - 1])
+        buffer?.flash(match)
+        return match.location
+    }
+
+    // MARK: - Helpers
+
+    private var text: String { buffer?.bufferText ?? "" }
+
+    private var cursor: Int {
+        get { buffer?.cursorRange.location ?? 0 }
+        set { buffer?.cursorRange = NSRange(location: max(0, min(newValue, text.utf16Length)), length: 0) }
+    }
+
+    private var units: TextUnits {
+        let current = text
+        if let cached = cachedUnits, cached.text == current { return cached }
+        let fresh = TextUnits(current)
+        cachedUnits = fresh
+        return fresh
+    }
+
+    private func substring(_ range: NSRange) -> String {
+        (text as NSString).substring(with: range)
+    }
+
+    private func replace(_ range: NSRange, with replacement: String, cursorAfter: Int? = nil) {
+        guard let buffer = buffer else { return }
+        buffer.replaceText(in: range, with: replacement)
+        cachedUnits = nil
+        if let position = cursorAfter { cursor = position }
+    }
+
+    private func leaveTransientModes() {
+        switch mode {
+        case .insert: exitInsert()
+        case .visual: exitVisual()
+        case .command, .search: mode = .normal
+        case .normal: break
+        }
+        pending = .none
+    }
+
+    private func scheduleStats() {
+        statsTimer?.invalidate()
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
+            self?.refreshStats()
+        }
+    }
+
+    private func refreshStats() {
+        stats = units.stats
     }
 }
