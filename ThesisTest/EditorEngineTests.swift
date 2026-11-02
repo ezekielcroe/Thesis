@@ -230,4 +230,23 @@ final class EditorEngineTests: XCTestCase {
         press("n")
         XCTAssertEqual(cursor, 6, "wraps around")
     }
+
+    func testFindWordMatchesWholeWordsOnly() {
+        load("There is the cat. Then the dog.")
+        engine.findWord("the")
+        XCTAssertEqual(cursor, 9)
+        press("n")
+        XCTAssertEqual(cursor, 23, "skips “Then”")
+        press("n")
+        XCTAssertEqual(cursor, 9, "wraps around, skipping “There”")
+    }
+
+    func testStatisticsCaptureVisualSelection() {
+        load("One. Two. Three.", cursor: 0)
+        press("vl")
+        engine.openStatistics()
+        guard case .statistics(let context)? = engine.activeSheet else { return XCTFail("expected statistics") }
+        XCTAssertEqual(context.selection, NSRange(location: 0, length: 9))
+        XCTAssertEqual(context.paragraph, NSRange(location: 0, length: 16))
+    }
 }

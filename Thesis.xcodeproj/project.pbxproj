@@ -30,6 +30,8 @@
 				EditorEngineTests.swift,
 				MarkdownTests.swift,
 				ProseDiffTests.swift,
+				ProseStatisticsTests.swift,
+				StatisticsTableTests.swift,
 			);
 			target = FE5783792F3311B8008D37D4 /* Thesis */;
 		};
@@ -41,6 +43,8 @@
 				EditorEngineTests.swift,
 				MarkdownTests.swift,
 				ProseDiffTests.swift,
+				ProseStatisticsTests.swift,
+				StatisticsTableTests.swift,
 			);
 			target = FEA9F526309888840020CF18 /* ThesisTests */;
 		};

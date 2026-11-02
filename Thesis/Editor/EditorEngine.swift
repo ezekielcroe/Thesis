@@ -61,16 +61,27 @@ struct Register: Equatable {
     var kind: UnitKind
 }
 
+/// What the statistics sheet can be scoped to, captured when it opens.
+struct StatisticsContext {
+    let text: String
+    /// The paragraph the cursor is in.
+    let paragraph: NSRange?
+    /// The Visual-mode selection, if statistics were opened from Visual mode.
+    let selection: NSRange?
+}
+
 enum EditorSheet: Identifiable {
     case review
     case note(range: NSRange, anchor: String)
     case help
+    case statistics(StatisticsContext)
 
     var id: String {
         switch self {
         case .review: return "review"
         case .note: return "note"
         case .help: return "help"
+        case .statistics: return "statistics"
         }
     }
 }
@@ -112,6 +123,8 @@ final class EditorEngine: ObservableObject {
     private var visualAnchor = 0
     private var visualKind: UnitKind = .sentence
     private var lastSearch = ""
+    /// Set when searching from the statistics sheet: match "the" but not "there".
+    private var lastSearchWholeWord = false
     private var cachedUnits: TextUnits?
     private var statsTimer: Timer?
 
@@ -152,6 +165,14 @@ final class EditorEngine: ObservableObject {
     // MARK: - Actions from the UI
 
     func openReview() { activeSheet = .review }
+
+    /// Opens statistics with what they can be scoped to: the current paragraph, and the
+    /// selection if in Visual mode.
+    func openStatistics() {
+        let selection = mode == .visual ? visualRange : nil
+        let paragraph = units.unit(.paragraph, at: cursor)?.range
+        activeSheet = .statistics(StatisticsContext(text: text, paragraph: paragraph, selection: selection))
+    }
 
     /// Before the preview covers the editor: finish typing, drop selections and pending keys.
     func prepareForPreview() {
@@ -567,6 +588,7 @@ final class EditorEngine: ObservableObject {
                 renameRequested = true
             }
         case "preview", "p": previewRequested = true
+        case "stats", "statistics": openStatistics()
         case "export":
             if let format = argument.flatMap(ExportFormat.init(command:)) {
                 exportRequest = format
@@ -589,6 +611,7 @@ final class EditorEngine: ObservableObject {
             buffer?.setHighlight(nil)
             guard !current.isEmpty else { return }
             lastSearch = current
+            lastSearchWholeWord = false
             let matches = searchMatches(current)
             let position = cursor
             if let match = matches.first(where: { $0.location >= position }) ?? matches.first {
@@ -623,23 +646,42 @@ final class EditorEngine: ObservableObject {
         buffer?.setHighlight(matches.first(where: { $0.location >= position }) ?? matches.first)
     }
 
-    private func searchMatches(_ query: String) -> [NSRange] {
+    private func searchMatches(_ query: String, wholeWord: Bool = false) -> [NSRange] {
         guard !query.isEmpty else { return [] }
         let ns = text as NSString
         var matches: [NSRange] = []
         var start = 0
+        func isWordCharacter(at index: Int) -> Bool {
+            guard index >= 0, index < ns.length, let scalar = Unicode.Scalar(ns.character(at: index)) else { return false }
+            return CharacterSet.alphanumerics.contains(scalar)
+        }
         while start < ns.length {
             let found = ns.range(of: query, options: .caseInsensitive,
                                  range: NSRange(location: start, length: ns.length - start))
             if found.location == NSNotFound { break }
-            matches.append(found)
+            if !wholeWord || (!isWordCharacter(at: found.location - 1) && !isWordCharacter(at: NSMaxRange(found))) {
+                matches.append(found)
+            }
             start = found.location + max(found.length, 1)
         }
         return matches
     }
 
+    /// Jumps to the next whole-word occurrence of `word`; n / N then step through the rest.
+    func findWord(_ word: String) {
+        leaveTransientModes()
+        lastSearch = word
+        lastSearchWholeWord = true
+        let total = searchMatches(word, wholeWord: true).count
+        if let target = searchMatch(forward: true) {
+            cursor = target
+            buffer?.revealCursor()
+            message = "“\(word)”: \(total) \(total == 1 ? "match" : "matches") — n / N for next / previous"
+        }
+    }
+
     private func searchMatch(forward: Bool) -> Int? {
-        let matches = searchMatches(lastSearch)
+        let matches = searchMatches(lastSearch, wholeWord: lastSearchWholeWord)
         guard !matches.isEmpty else {
             message = lastSearch.isEmpty ? "No search yet — press / to search" : "Not found: \(lastSearch)"
             return nil

@@ -46,6 +46,36 @@ enum Exporter {
         }
     }
 
+    // MARK: - Statistics tables
+
+    /// Puts the table on the clipboard as HTML (Word and Pages paste a real table) and as
+    /// tab-separated text (spreadsheets split it into cells).
+    static func copy(_ table: StatisticsTable) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        let tsv = table.tsv()
+        pasteboard.setString(table.html(), forType: .html)
+        pasteboard.setString(tsv, forType: NSPasteboard.PasteboardType("public.utf8-tab-separated-values-text"))
+        pasteboard.setString(tsv, forType: .string)
+    }
+
+    static func saveCSV(_ table: StatisticsTable, documentTitle: String) {
+        let panel = NSSavePanel()
+        panel.title = "Save Statistics as CSV"
+        let base = DocumentExport.suggestedFileName(title: documentTitle, format: .plainText)
+            .replacingOccurrences(of: ".txt", with: "")
+        panel.nameFieldStringValue = "\(base) statistics.csv"
+        panel.allowedContentTypes = [.commaSeparatedText]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            // A byte-order mark lets Excel recognise UTF-8 (accents, curly quotes).
+            try ("\u{FEFF}" + table.csv()).write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+    }
+
     static func backUpAll(_ documents: [Document]) {
         let panel = NSSavePanel()
         panel.title = "Back Up All Documents"

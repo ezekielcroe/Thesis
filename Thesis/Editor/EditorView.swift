@@ -47,7 +47,8 @@ struct EditorView: View {
                         snapshotInfo: snapshotInfo,
                         hasUnsnapshottedChanges: document.hasUnsnapshottedChanges,
                         openNotes: document.notes.filter { !$0.resolved }.count,
-                        searchMatchCount: engine.searchMatchCount
+                        searchMatchCount: engine.searchMatchCount,
+                        onShowStatistics: { engine.openStatistics() }
                     )
                 }
                 .frame(minWidth: 480)
@@ -78,6 +79,13 @@ struct EditorView: View {
                 }
             case .help:
                 HelpSheet()
+            case .statistics(let context):
+                StatisticsSheet(
+                    title: document.title,
+                    context: context,
+                    onJump: { range in DispatchQueue.main.async { engine.jump(to: range) } },
+                    onFindWord: { word in DispatchQueue.main.async { engine.findWord(word) } }
+                )
             }
         }
         // @Published notifies *before* storing the new value, so each request is cleared
@@ -129,6 +137,14 @@ struct EditorView: View {
             .help("Rename (⇧⌘R or :rename)")
             .padding()
             Spacer()
+            Button {
+                engine.openStatistics()
+            } label: {
+                Label("Statistics", systemImage: "chart.bar.xaxis")
+            }
+            .buttonStyle(.borderless)
+            .keyboardShortcut("i", modifiers: [.command, .shift])
+            .help("Counts and sentence/paragraph lengths (⇧⌘I or :stats)")
             Button {
                 togglePreview()
             } label: {
@@ -235,6 +251,7 @@ struct StatusBar: View {
     let hasUnsnapshottedChanges: Bool
     let openNotes: Int
     let searchMatchCount: Int
+    var onShowStatistics: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -262,9 +279,15 @@ struct StatusBar: View {
                     .font(.system(size: 11))
                     .foregroundColor(.purple)
             }
-            Text("\(stats.paragraphs) ¶   \(stats.sentences) S   \(stats.words) W")
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(.secondary)
+            Button {
+                onShowStatistics?()
+            } label: {
+                Text("\(stats.paragraphs) ¶   \(stats.sentences) S   \(stats.words) W")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Show statistics (⇧⌘I)")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
