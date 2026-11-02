@@ -1,3 +1,11 @@
+//
+//  Snapshot.swift
+//  Thesis
+//
+//  Created by Zhi Zheng Yeo on 2/11/26.
+//
+
+
 // Snapshot.swift — Thesis
 // A saved version of a document's text, the darlings cut from it, and when snapshots are taken.
 

@@ -9,7 +9,12 @@ import UniformTypeIdentifiers
 
 @MainActor
 enum Exporter {
-    static let archiveType = UTType(filenameExtension: "thesis", conformingTo: .json) ?? .json
+    /// Declared in Info.plist (UTExportedTypeDeclarations), which is what lets Finder
+    /// show "Thesis Archive" and open these files in Thesis on double-click.
+    static let archiveType = UTType(exportedAs: "com.thesis.app.archive", conformingTo: .json)
+
+    /// Files opened recently, so a file that reaches us by two routes is imported once.
+    private static var recentlyOpened: [URL: Date] = [:]
 
     enum ExportError: LocalizedError {
         case pdfFailed
@@ -57,6 +62,27 @@ enum Exporter {
     }
 
     // MARK: - Import
+
+    /// Imports archives opened from Finder (double-click, Open With, dropping on the Dock icon).
+    static func open(_ urls: [URL], into manager: DocumentManager) {
+        let now = Date()
+        recentlyOpened = recentlyOpened.filter { now.timeIntervalSince($0.value) < 3 }
+        for url in urls where url.isFileURL {
+            let key = url.standardizedFileURL
+            guard recentlyOpened[key] == nil else { continue }
+            recentlyOpened[key] = now
+            do {
+                let documents = try DocumentExport.documents(fromArchive: Data(contentsOf: url))
+                manager.importDocuments(documents, resolve: askAboutConflict)
+            } catch {
+                let alert = NSAlert(error: error)
+                alert.messageText = "“\(url.lastPathComponent)” couldn't be opened"
+                alert.informativeText = error.localizedDescription
+                alert.runModal()
+            }
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     /// Asks for a .thesis archive (or a documents.json) and reads it.
     static func chooseArchive() -> [Document]? {
@@ -161,5 +187,31 @@ enum Exporter {
     private static func serif(size: CGFloat, bold: Bool) -> NSFont {
         let base = NSFont.systemFont(ofSize: size, weight: bold ? .bold : .regular)
         return base.fontDescriptor.withDesign(.serif).flatMap { NSFont(descriptor: $0, size: size) } ?? base
+    }
+}
+
+// MARK: - Name prompt
+
+/// A standard AppKit dialog with a text field. Used instead of a SwiftUI `.alert`
+/// because alerts inside the split view didn't reliably appear on macOS.
+@MainActor
+enum NamePrompt {
+    /// Returns the entered text, or nil if cancelled or left empty.
+    static func ask(title: String, message: String, initialValue: String, confirmTitle: String) -> String? {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: confirmTitle)   // first button: Return
+        alert.addButton(withTitle: "Cancel")       // Escape
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        field.stringValue = initialValue
+        field.placeholderString = "Title"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? nil : name
     }
 }

@@ -1,11 +1,3 @@
-//
-//  NoteCategory.swift
-//  Thesis
-//
-//  Created by Zhi Zheng Yeo on 2/11/26.
-//
-
-
 // Note.swift — Thesis
 // Notes attached to a span of text. The span is kept up to date on every edit
 // (typing, commands, undo), so notes stay attached to the words they describe.

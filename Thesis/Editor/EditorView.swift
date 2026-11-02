@@ -2,9 +2,11 @@
 // One document: title, the modal editor, the status bar, and the Evolution panel.
 
 import SwiftUI
+import Combine
 
 struct EditorView: View {
     @ObservedObject var document: Document
+    @EnvironmentObject private var documentManager: DocumentManager
     @StateObject private var engine: EditorEngine
     @AppStorage("showEvolutionPanel") private var showingPanel = false
     @State private var panelTab: PanelTab = .history
@@ -68,21 +70,58 @@ struct EditorView: View {
                 HelpSheet()
             }
         }
+        // @Published notifies *before* storing the new value, so each request is cleared
+        // on the next turn; clearing it inside the handler would be overwritten.
         .onReceive(engine.$panelRequest.compactMap { $0 }) { tab in
             panelTab = tab
             showingPanel = true
-            engine.panelRequest = nil
+            DispatchQueue.main.async { engine.panelRequest = nil }
+        }
+        .onReceive(engine.$renameRequested.filter { $0 }) { _ in
+            DispatchQueue.main.async {
+                engine.renameRequested = false
+                documentManager.requestName(for: document)
+            }
+        }
+        .onReceive(engine.$exportRequest.compactMap { $0 }) { format in
+            // Also lets the key event finish before the modal save panel takes over.
+            DispatchQueue.main.async {
+                engine.exportRequest = nil
+                Exporter.export(document, as: format)
+            }
         }
         .onDisappear { engine.flushSnapshots() }
     }
 
     private var header: some View {
-        HStack {
-            TextField("Title", text: $document.title)
-                .textFieldStyle(.plain)
-                .font(.title2)
-                .padding()
+        HStack(spacing: 14) {
+            Button {
+                documentManager.requestName(for: document)
+            } label: {
+                HStack(spacing: 6) {
+                    Text(document.title.isEmpty ? "Untitled" : document.title)
+                        .font(.title2)
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                    Image(systemName: "pencil")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Rename (⇧⌘R or :rename)")
+            .padding()
             Spacer()
+            Menu {
+                ForEach(ExportFormat.allCases) { format in
+                    Button(format.menuTitle) { Exporter.export(document, as: format) }
+                }
+            } label: {
+                Label("Export", systemImage: "square.and.arrow.up")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
             Button {
                 showingPanel.toggle()
             } label: {

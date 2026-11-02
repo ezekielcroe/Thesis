@@ -1,3 +1,11 @@
+//
+//  NoteSheet.swift
+//  Thesis
+//
+//  Created by Zhi Zheng Yeo on 2/11/26.
+//
+
+
 // Sheets.swift — Thesis
 // Adding a note, the key reference, and Settings.
 

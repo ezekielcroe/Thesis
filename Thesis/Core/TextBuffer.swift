@@ -1,3 +1,11 @@
+//
+//  TextBuffer.swift
+//  Thesis
+//
+//  Created by Zhi Zheng Yeo on 2/11/26.
+//
+
+
 // TextBuffer.swift — Thesis
 // The editor engine edits text only through this protocol. In the app it is the
 // NSTextView (so every edit is natively undoable); in tests it's a plain string.

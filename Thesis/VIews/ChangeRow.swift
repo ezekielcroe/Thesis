@@ -1,3 +1,11 @@
+//
+//  ChangeRow.swift
+//  Thesis
+//
+//  Created by Zhi Zheng Yeo on 2/11/26.
+//
+
+
 // ChangeRow.swift — Thesis
 // Shows one ProseChange: what kind it is and the text, with rewordings inline.
 

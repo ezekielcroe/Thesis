@@ -1,3 +1,11 @@
+//
+//  HistoryPanel.swift
+//  Thesis
+//
+//  Created by Zhi Zheng Yeo on 2/11/26.
+//
+
+
 // HistoryPanel.swift — Thesis
 // The Evolution panel: snapshot history with the changes and reasons between named
 // snapshots, darlings (everything ever cut), and notes.

@@ -6,7 +6,7 @@ import Foundation
 import Combine
 
 final class Document: ObservableObject, Identifiable, Codable, Equatable {
-    let id: UUID
+    private(set) var id: UUID
     @Published var title: String
     /// The text right now. While editing, the text view is the source of truth and
     /// writes every change here.
@@ -38,6 +38,11 @@ final class Document: ObservableObject, Identifiable, Codable, Equatable {
     }
 
     static func == (lhs: Document, rhs: Document) -> Bool { lhs.id == rhs.id }
+
+    /// Gives an imported copy its own identity, so it can sit alongside the original.
+    func assignNewIdentity() {
+        id = UUID()
+    }
 
     // MARK: - Snapshots
 

@@ -1,5 +1,5 @@
 //
-//  ChangeKind.swift
+//  ProseDiff.swift
 //  Thesis
 //
 //  Created by Zhi Zheng Yeo on 2/11/26.
