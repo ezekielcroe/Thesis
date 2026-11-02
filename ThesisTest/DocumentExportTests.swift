@@ -30,7 +30,8 @@ final class DocumentExportTests: XCTestCase {
     func testExportFormatFromCommand() {
         XCTAssertEqual(ExportFormat(command: "MD"), .markdown)
         XCTAssertEqual(ExportFormat(command: "backup"), .archive)
-        XCTAssertNil(ExportFormat(command: "docx"))
+        XCTAssertEqual(ExportFormat(command: "docx"), .word)
+        XCTAssertNil(ExportFormat(command: "pages"))
     }
 
     func testArchiveRoundTripKeepsEverything() throws {

@@ -9,6 +9,7 @@ enum ExportFormat: String, CaseIterable, Identifiable {
     case plainText = "txt"
     case markdown = "md"
     case pdf = "pdf"
+    case word = "docx"
     case archive = "thesis"
 
     var id: String { rawValue }
@@ -19,6 +20,7 @@ enum ExportFormat: String, CaseIterable, Identifiable {
         case .plainText: return "Plain Text (.txt)…"
         case .markdown: return "Markdown (.md)…"
         case .pdf: return "PDF…"
+        case .word: return "Word (.docx)…"
         case .archive: return "Thesis Archive with History (.thesis)…"
         }
     }
@@ -29,6 +31,7 @@ enum ExportFormat: String, CaseIterable, Identifiable {
         case "txt", "text", "plain": self = .plainText
         case "md", "markdown": self = .markdown
         case "pdf": self = .pdf
+        case "docx", "word": self = .word
         case "thesis", "archive", "backup": self = .archive
         default: return nil
         }

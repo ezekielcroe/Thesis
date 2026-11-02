@@ -37,7 +37,9 @@ enum Exporter {
             case .markdown:
                 try DocumentExport.markdown(document).write(to: url, atomically: true, encoding: .utf8)
             case .pdf:
-                try writePDF(document, to: url)
+                try writePDF(title: document.title, markdown: document.content, to: url)
+            case .word:
+                try writeWord(title: document.title, markdown: document.content, to: url)
             case .archive:
                 try DocumentExport.archiveData([document]).write(to: url, options: .atomic)
             }
@@ -102,8 +104,13 @@ enum Exporter {
             guard recentlyOpened[key] == nil else { continue }
             recentlyOpened[key] = now
             do {
-                let documents = try DocumentExport.documents(fromArchive: Data(contentsOf: url))
-                manager.importDocuments(documents, resolve: askAboutConflict)
+                let ext = url.pathExtension.lowercased()
+                if DocumentImport.archiveExtensions.contains(ext) {
+                    let documents = try DocumentExport.documents(fromArchive: Data(contentsOf: url))
+                    manager.importDocuments(documents, resolve: askAboutConflict)
+                } else {
+                    manager.importDocuments([try importFile(url)], resolve: askAboutConflict)
+                }
             } catch {
                 let alert = NSAlert(error: error)
                 alert.messageText = "“\(url.lastPathComponent)” couldn't be opened"
@@ -114,20 +121,82 @@ enum Exporter {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// Asks for a .thesis archive (or a documents.json) and reads it.
-    static func chooseArchive() -> [Document]? {
+    /// File ▸ Open…: Thesis archives, plus text, Markdown and Word-type documents.
+    static func showOpenPanel(into manager: DocumentManager) {
         let panel = NSOpenPanel()
-        panel.title = "Import Thesis Archive"
-        panel.allowedContentTypes = [archiveType, .json]
-        panel.allowsMultipleSelection = false
+        panel.title = "Open"
+        panel.message = "Choose Thesis archives, or text, Markdown, Word, RTF or OpenDocument files to import."
+        panel.allowedContentTypes = openableTypes
+        panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        guard panel.runModal() == .OK else { return }
+        open(panel.urls, into: manager)
+    }
+
+    /// A text, Markdown or rich-text file as a new document, starting with an "Imported"
+    /// snapshot so its evolution log begins with the original.
+    static func importFile(_ url: URL) throws -> Document {
+        let ext = url.pathExtension.lowercased()
+        let fallbackTitle = DocumentImport.title(fromFileName: url.lastPathComponent)
+        let raw: String
+        var isMarkdown = DocumentImport.markdownExtensions.contains(ext)
+        var isRichText = false
+        if DocumentImport.richTextExtensions.contains(ext) || ext == "pages" {
+            raw = RichTextImporter.markdown(from: try RichTextImporter.read(url))
+            isMarkdown = true
+            isRichText = true
+        } else if let utf8 = try? String(contentsOf: url, encoding: .utf8) {
+            raw = utf8
+        } else {
+            // Not UTF-8: let Foundation detect the encoding (e.g. older Windows or Mac text).
+            var encoding = String.Encoding.utf8
+            raw = try String(contentsOf: url, usedEncoding: &encoding)
+        }
+        let prepared = DocumentImport.prepare(raw, isMarkdown: isMarkdown, fallbackTitle: fallbackTitle,
+                                              unwrap: !isRichText)
+        let document = Document(title: prepared.title)
+        document.content = prepared.content
+        document.takeSnapshot(name: "Imported", note: "From “\(url.lastPathComponent)”")
+        return document
+    }
+
+    // MARK: - Evolution log
+
+    static func exportEvolutionLog(_ document: Document, as format: EvolutionLogFormat) {
+        let panel = NSSavePanel()
+        let name = document.title.isEmpty ? "Untitled" : document.title
+        panel.title = "Export Evolution Log of “\(name)”"
+        let base = DocumentExport.suggestedFileName(title: document.title, format: .plainText)
+            .replacingOccurrences(of: ".txt", with: "")
+        panel.nameFieldStringValue = "\(base) evolution.\(format.fileExtension)"
+        switch format {
+        case .markdown:
+            panel.allowedContentTypes = [UTType(filenameExtension: "md", conformingTo: .plainText) ?? .plainText]
+        case .pdf: panel.allowedContentTypes = [.pdf]
+        case .word: panel.allowedContentTypes = [wordType]
+        }
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let markdown = EvolutionReport.markdown(for: document)
         do {
-            return try DocumentExport.documents(fromArchive: Data(contentsOf: url))
+            switch format {
+            case .markdown: try markdown.write(to: url, atomically: true, encoding: .utf8)
+            case .pdf: try writePDF(title: nil, markdown: markdown, to: url)
+            case .word: try writeWord(title: nil, markdown: markdown, to: url)
+            }
         } catch {
             NSAlert(error: error).runModal()
-            return nil
         }
+    }
+
+    /// Word document from the same formatted text as the PDF (macOS writes .docx natively).
+    private static func writeWord(title: String?, markdown: String, to url: URL) throws {
+        let attributed = MarkdownRenderer.render(title: title, markdown: markdown, style: .print)
+        let data = try attributed.data(
+            from: NSRange(location: 0, length: attributed.length),
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.officeOpenXML]
+        )
+        try data.write(to: url, options: .atomic)
     }
 
     static func askAboutConflict(_ document: Document) -> ImportChoice {
@@ -151,12 +220,28 @@ enum Exporter {
         case .plainText: return .plainText
         case .markdown: return UTType(filenameExtension: "md", conformingTo: .plainText) ?? .plainText
         case .pdf: return .pdf
+        case .word: return wordType
         case .archive: return archiveType
         }
     }
 
+    static let wordType = UTType("org.openxmlformats.wordprocessingml.document")
+        ?? UTType(filenameExtension: "docx") ?? .data
+
+    /// Everything File ▸ Open… accepts.
+    static var openableTypes: [UTType] {
+        var types: [UTType] = [archiveType, .json, .plainText, wordType, .rtf, .rtfd, .html]
+        for identifier in ["net.daringfireball.markdown", "com.microsoft.word.doc", "org.oasis-open.opendocument.text"] {
+            if let type = UTType(identifier) { types.append(type) }
+        }
+        for ext in ["md", "markdown"] {
+            if let type = UTType(filenameExtension: ext) { types.append(type) }
+        }
+        return types
+    }
+
     /// Lays the text out on pages with the system's print pagination, saving to `url`.
-    private static func writePDF(_ document: Document, to url: URL) throws {
+    private static func writePDF(title: String?, markdown: String, to url: URL) throws {
         let printInfo = NSPrintInfo(dictionary: [.jobSavingURL: url])
         printInfo.jobDisposition = .save
         printInfo.topMargin = 72
@@ -175,7 +260,7 @@ enum Exporter {
         textView.textContainer?.lineFragmentPadding = 0
         textView.isVerticallyResizable = true
         textView.textStorage?.setAttributedString(
-            MarkdownRenderer.render(title: document.title, markdown: document.content, style: .print)
+            MarkdownRenderer.render(title: title, markdown: markdown, style: .print)
         )
         if let layoutManager = textView.layoutManager, let container = textView.textContainer {
             layoutManager.ensureLayout(for: container)

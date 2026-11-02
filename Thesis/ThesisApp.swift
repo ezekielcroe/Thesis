@@ -40,6 +40,9 @@ struct ThesisApp: App {
                 }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
                 .disabled(documentManager.selectedDocument == nil)
+                Divider()
+                Button("Open…") { Exporter.showOpenPanel(into: documentManager) }
+                    .keyboardShortcut("o", modifiers: [.command])
             }
             CommandGroup(replacing: .importExport) {
                 Menu("Export") {
@@ -48,16 +51,16 @@ struct ThesisApp: App {
                             if let doc = documentManager.selectedDocument { Exporter.export(doc, as: format) }
                         }
                     }
+                    Divider()
+                    ForEach(EvolutionLogFormat.allCases) { format in
+                        Button(format.menuTitle) {
+                            if let doc = documentManager.selectedDocument { Exporter.exportEvolutionLog(doc, as: format) }
+                        }
+                    }
                 }
                 .disabled(documentManager.selectedDocument == nil)
                 Button("Back Up All Documents…") { Exporter.backUpAll(documentManager.documents) }
                     .disabled(documentManager.documents.isEmpty)
-                Divider()
-                Button("Import Archive…") {
-                    if let imported = Exporter.chooseArchive() {
-                        documentManager.importDocuments(imported, resolve: Exporter.askAboutConflict)
-                    }
-                }
             }
             // Documents save themselves; ⌘S belongs to the editor (review + named snapshot).
             CommandGroup(replacing: .saveItem) {}
