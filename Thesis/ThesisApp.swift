@@ -35,6 +35,8 @@ struct ThesisApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New Document") { documentManager.createNewDocument() }
                     .keyboardShortcut("n", modifiers: [.command])
+                Button("New Project") { documentManager.createGroup(.project) }
+                Button("New Shelf") { documentManager.createGroup(.shelf) }
                 Button("Rename Document…") {
                     if let doc = documentManager.selectedDocument { documentManager.requestName(for: doc) }
                 }
@@ -59,7 +61,7 @@ struct ThesisApp: App {
                     }
                 }
                 .disabled(documentManager.selectedDocument == nil)
-                Button("Back Up All Documents…") { Exporter.backUpAll(documentManager.documents) }
+                Button("Back Up All Documents…") { Exporter.backUpAll(documentManager.documents, groups: documentManager.groups) }
                     .disabled(documentManager.documents.isEmpty)
             }
             // Documents save themselves; ⌘S belongs to the editor (review + named snapshot).

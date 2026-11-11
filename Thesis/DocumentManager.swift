@@ -13,6 +13,10 @@ final class DocumentManager: ObservableObject {
         didSet { observeDocuments() }
     }
     @Published var selectedDocument: Document?
+    /// Shelves and projects (see Library.swift). Documents point at theirs with `groupID`.
+    @Published var groups: [LibraryGroup] = [] {
+        didSet { saveRequests.send() }
+    }
 
     /// Non-nil when the save file existed but couldn't be read. Shown to the user.
     @Published var loadErrorMessage: String?
@@ -76,12 +80,132 @@ final class DocumentManager: ObservableObject {
         }
     }
 
+    /// A new document next to the selected one: in the same shelf or project, if any.
     func createNewDocument() {
+        let group = selectedDocument.flatMap { Library.groupID(of: $0, in: groups) }
+        createNewDocument(inGroup: group)
+    }
+
+    func createNewDocument(inGroup groupID: UUID?) {
         let doc = Document(title: "Untitled")
-        documents.insert(doc, at: 0)
+        doc.groupID = groupID
+        if let groupID = groupID {
+            documents.append(doc)                       // last in its group
+            setCollapsed(false, revealing: groupID)
+        } else {
+            documents.insert(doc, at: 0)
+        }
         selectedDocument = doc
         saveDocuments()
         requestName(for: doc, isNew: true)
+    }
+
+    // MARK: - Shelves and projects
+
+    func createGroup(_ kind: LibraryGroup.Kind, onShelf shelfID: UUID? = nil) {
+        Task { @MainActor in
+            guard let name = NamePrompt.ask(
+                title: "New \(kind.displayName.lowercased())",
+                message: kind == .shelf
+                    ? "A shelf holds projects and documents."
+                    : "A project holds the documents of one piece of work: a thesis, a book, a screenplay.",
+                initialValue: "",
+                confirmTitle: "Create"
+            ) else { return }
+            self.groups.append(LibraryGroup(name: name, kind: kind, parentID: shelfID))
+            if let shelfID = shelfID { self.setCollapsed(false, revealing: shelfID) }
+        }
+    }
+
+    func renameGroup(_ id: UUID) {
+        guard let group = groups.first(where: { $0.id == id }) else { return }
+        Task { @MainActor in
+            guard let name = NamePrompt.ask(
+                title: "Rename \(group.kind.displayName.lowercased())",
+                message: "Enter a new name.",
+                initialValue: group.name,
+                confirmTitle: "Rename"
+            ), let index = self.groups.firstIndex(where: { $0.id == id }) else { return }
+            self.groups[index].name = name
+        }
+    }
+
+    /// Removes the shelf or project but keeps what was in it, moved up one level.
+    func removeGroup(_ id: UUID) {
+        guard let group = groups.first(where: { $0.id == id }) else { return }
+        let destination = group.kind == .project ? group.parentID : nil
+        for doc in documents where doc.groupID == id { doc.groupID = destination }
+        var remaining = groups.filter { $0.id != id }
+        for index in remaining.indices where remaining[index].parentID == id {
+            remaining[index].parentID = nil
+        }
+        groups = remaining
+    }
+
+    func toggleCollapsed(_ id: UUID) {
+        guard let index = groups.firstIndex(where: { $0.id == id }) else { return }
+        groups[index].isCollapsed.toggle()
+    }
+
+    /// Opens a group (and the shelf it is on) so something just put in it can be seen.
+    private func setCollapsed(_ collapsed: Bool, revealing id: UUID) {
+        guard let index = groups.firstIndex(where: { $0.id == id }) else { return }
+        if groups[index].isCollapsed != collapsed { groups[index].isCollapsed = collapsed }
+        if let parent = groups[index].parentID, let parentIndex = groups.firstIndex(where: { $0.id == parent }),
+           groups[parentIndex].isCollapsed != collapsed {
+            groups[parentIndex].isCollapsed = collapsed
+        }
+    }
+
+    /// Moves a document into a shelf or project (nil: out to the top level), as its last item.
+    func move(_ doc: Document, toGroup groupID: UUID?) {
+        guard let index = documents.firstIndex(where: { $0.id == doc.id }) else { return }
+        doc.groupID = groupID
+        var reordered = documents
+        reordered.remove(at: index)
+        reordered.append(doc)
+        documents = reordered
+        if let groupID = groupID { setCollapsed(false, revealing: groupID) }
+    }
+
+    /// Puts a project on a shelf (nil: at the top level).
+    func moveProject(_ id: UUID, toShelf shelfID: UUID?) {
+        guard let index = groups.firstIndex(where: { $0.id == id }), groups[index].kind == .project else { return }
+        var project = groups[index]
+        project.parentID = shelfID
+        var reordered = groups
+        reordered.remove(at: index)
+        reordered.append(project)
+        groups = reordered
+        if let shelfID = shelfID { setCollapsed(false, revealing: shelfID) }
+    }
+
+    /// Moves a document one place up (-1) or down (+1) among the documents in its group.
+    func moveDocument(_ doc: Document, by offset: Int) {
+        let siblings = Library.documents(in: Library.groupID(of: doc, in: groups), documents: documents, groups: groups)
+        guard let position = siblings.firstIndex(where: { $0.id == doc.id }),
+              siblings.indices.contains(position + offset),
+              let a = documents.firstIndex(where: { $0.id == doc.id }),
+              let b = documents.firstIndex(where: { $0.id == siblings[position + offset].id }) else { return }
+        documents.swapAt(a, b)
+    }
+
+    /// Moves a shelf or project one place up or down among its siblings.
+    func moveGroup(_ id: UUID, by offset: Int) {
+        guard let group = groups.first(where: { $0.id == id }) else { return }
+        let siblings: [LibraryGroup]
+        if group.kind == .shelf {
+            siblings = Library.shelves(groups)
+        } else {
+            let shelfIDs = Set(Library.shelves(groups).map(\.id))
+            let shelf = group.parentID.flatMap { shelfIDs.contains($0) ? $0 : nil }
+            siblings = Library.projects(onShelf: shelf, groups: groups)
+        }
+        guard let position = siblings.firstIndex(where: { $0.id == id }),
+              siblings.indices.contains(position + offset),
+              let a = groups.firstIndex(where: { $0.id == id }),
+              let b = groups.firstIndex(where: { $0.id == siblings[position + offset].id }) else { return }
+        groups.swapAt(a, b)
     }
 
     // MARK: - Naming
@@ -106,7 +230,11 @@ final class DocumentManager: ObservableObject {
     /// Adds documents read from an archive. If one is already here (same identity),
     /// `resolve` decides: keep both (the import gets its own identity), replace, or skip.
     @MainActor
-    func importDocuments(_ imported: [Document], resolve: @MainActor (Document) -> ImportChoice) {
+    func importDocuments(_ imported: [Document], groups importedGroups: [LibraryGroup] = [],
+                         resolve: @MainActor (Document) -> ImportChoice) {
+        // Shelves and projects from a library backup, unless they're already here.
+        let newGroups = importedGroups.filter { group in !groups.contains(where: { $0.id == group.id }) }
+        if !newGroups.isEmpty { groups += newGroups }
         var lastAdded: Document?
         for doc in imported {
             if let index = documents.firstIndex(where: { $0.id == doc.id }) {
@@ -142,10 +270,8 @@ final class DocumentManager: ObservableObject {
             return
         }
         do {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = .prettyPrinted
-            let data = try encoder.encode(documents)
+            // Same format as a .thesis backup of the whole library: documents plus groups.
+            let data = try DocumentExport.archiveData(documents, groups: groups)
             try data.write(to: saveURL, options: .atomic)
         } catch {
             print("Save error: \(error)")
@@ -156,9 +282,10 @@ final class DocumentManager: ObservableObject {
         guard FileManager.default.fileExists(atPath: saveURL.path) else { return }
         do {
             let data = try Data(contentsOf: saveURL)
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            documents = try decoder.decode([Document].self, from: data)
+            // Reads the current format, and the plain list of documents earlier versions saved.
+            let library = try DocumentExport.library(fromArchive: data)
+            documents = library.documents
+            groups = library.groups
             selectedDocument = documents.first
         } catch {
             // Never let a failed load turn into an overwrite. Keep a copy of the file

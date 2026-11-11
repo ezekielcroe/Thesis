@@ -1,11 +1,3 @@
-//
-//  SnapshotScheduler.swift
-//  Thesis
-//
-//  Created by Zhi Zheng Yeo on 2/11/26.
-//
-
-
 // SnapshotScheduler.swift — Thesis
 // Takes automatic snapshots of one document according to the user's setting
 // (Settings → "Take snapshots"): after a pause in typing, on an interval, or never.
