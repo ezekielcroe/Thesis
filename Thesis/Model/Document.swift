@@ -19,6 +19,8 @@ final class Document: ObservableObject, Identifiable, Codable, Equatable {
     /// Why a change was made, keyed by `ProseChange.fingerprint`.
     @Published private(set) var reasons: [String: String]
     @Published var lastModified: Date
+    /// The shelf or project this document is in (see Library.swift); nil at the top level.
+    @Published var groupID: UUID?
 
     /// Snapshots never change, so diffs between two of them can be cached for good.
     private var diffCache: [String: [ProseChange]] = [:]
@@ -57,6 +59,9 @@ final class Document: ObservableObject, Identifiable, Codable, Equatable {
         let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let snapshotName: String? = trimmedName.isEmpty ? nil : trimmedName
 
+        // First, even if no snapshot results: settle cuts captured since the last one.
+        let confirmed = reconcilePendingDarlings()
+
         if let latest = snapshots.last, latest.content == content {
             guard snapshotName != nil else { return nil }
             if latest.isAutomatic {
@@ -68,7 +73,7 @@ final class Document: ObservableObject, Identifiable, Codable, Equatable {
         }
         if snapshots.isEmpty && content.isEmpty && snapshotName == nil { return nil }
 
-        collectDarlings(from: snapshots.last?.content ?? "", to: content, at: Date())
+        collectDarlings(from: snapshots.last?.content ?? "", to: content, at: Date(), justConfirmed: confirmed)
         let snapshot = Snapshot(content: content, name: snapshotName, note: note)
         snapshots.append(snapshot)
         pruneAutomaticSnapshots()
@@ -113,14 +118,69 @@ final class Document: ObservableObject, Identifiable, Codable, Equatable {
 
     // MARK: - Darlings
 
-    private func collectDarlings(from old: String, to new: String, at date: Date) {
+    /// A deliberate cut shorter than this isn't worth keeping (a word or two).
+    static let minimumDarlingWords = 3
+
+    /// Called the moment text is cut on purpose (d, c, ⌘X; not backspacing while typing).
+    /// The cut is kept straight away, so text written and cut between two snapshots isn't
+    /// lost, and is confirmed or dropped at the next snapshot (see `reconcilePendingDarlings`).
+    func recordCut(_ text: String) {
+        let key = ProseDiff.normalize(text)
+        guard ProseDiff.words(key).count >= Self.minimumDarlingWords else { return }
+        guard !darlings.contains(where: { ProseDiff.normalize($0.text) == key }) else { return }
+        darlings.append(Darling(text: text.trimmingCharacters(in: .whitespacesAndNewlines),
+                                replacedBy: nil,
+                                fingerprint: ProseDiff.fingerprint(kind: .cut, before: text, after: nil),
+                                pending: true))
+    }
+
+    /// Before a snapshot: a pending cut whose text is in the document again was a move
+    /// (cut, then put elsewhere) or was undone, so it isn't a darling. The rest are kept.
+    /// Returns the ids of those kept, so the snapshot comparison can enrich them.
+    private func reconcilePendingDarlings() -> Set<UUID> {
+        guard darlings.contains(where: \.isPending) else { return [] }
+        let current = ProseDiff.normalize(content)
+        var confirmed = Set<UUID>()
+        var kept: [Darling] = []
+        for var darling in darlings {
+            if darling.isPending {
+                if current.contains(ProseDiff.normalize(darling.text)) { continue }
+                darling.pending = nil
+                confirmed.insert(darling.id)
+            }
+            kept.append(darling)
+        }
+        darlings = kept
+        return confirmed
+    }
+
+    /// Adds what the comparison of two snapshots shows was cut or rewritten away.
+    /// - Parameter justConfirmed: cuts captured on the spot since the last snapshot. When
+    ///   the comparison finds the same text, the existing entry is kept (no duplicate) and
+    ///   gains what only the comparison knows: what replaced it, and the change's fingerprint,
+    ///   which is what a reason given in the review sheet is filed under.
+    private func collectDarlings(from old: String, to new: String, at date: Date,
+                                 justConfirmed: Set<UUID> = []) {
         guard !old.isEmpty else { return }
-        var known = Set(darlings.map { ProseDiff.normalize($0.text) })
+        var known = darlings.map { ProseDiff.normalize($0.text) }
+        let confirmedKeys = darlings.filter { justConfirmed.contains($0.id) }.map { ProseDiff.normalize($0.text) }
         for change in ProseDiff.changes(from: old, to: new) {
             guard let lost = change.lostText else { continue }
             let key = ProseDiff.normalize(lost)
-            guard !key.isEmpty, !known.contains(key) else { continue }
-            known.insert(key)
+            guard !key.isEmpty else { continue }
+            if let index = known.firstIndex(of: key) {
+                let existing = darlings[index]
+                if justConfirmed.contains(existing.id) {
+                    darlings[index] = Darling(text: existing.text,
+                                              replacedBy: change.kind == .rewritten ? change.after : nil,
+                                              fingerprint: change.fingerprint,
+                                              cutAt: existing.cutAt, id: existing.id)
+                }
+                continue
+            }
+            // Part of a passage that was cut as one piece since the last snapshot.
+            if confirmedKeys.contains(where: { $0.contains(key) }) { continue }
+            known.append(key)
             darlings.append(Darling(text: lost,
                                     replacedBy: change.kind == .rewritten ? change.after : nil,
                                     fingerprint: change.fingerprint,
@@ -224,7 +284,7 @@ final class Document: ObservableObject, Identifiable, Codable, Equatable {
     // MARK: - Codable
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, content, snapshots, darlings, notes, reasons, lastModified
+        case id, title, content, snapshots, darlings, notes, reasons, lastModified, groupID
         case currentContent, drafts, annotations   // earlier versions
     }
 
@@ -242,6 +302,7 @@ final class Document: ObservableObject, Identifiable, Codable, Equatable {
             ?? c.decodeIfPresent([Note].self, forKey: .annotations) ?? []
         reasons = try c.decodeIfPresent([String: String].self, forKey: .reasons) ?? [:]
         lastModified = try c.decodeIfPresent(Date.self, forKey: .lastModified) ?? Date()
+        groupID = try c.decodeIfPresent(UUID.self, forKey: .groupID)
         let storedDarlings = try c.decodeIfPresent([Darling].self, forKey: .darlings)
         darlings = storedDarlings ?? []
         if storedDarlings == nil { rebuildDarlingsFromHistory() }
@@ -258,5 +319,6 @@ final class Document: ObservableObject, Identifiable, Codable, Equatable {
         try c.encode(notes, forKey: .notes)
         try c.encode(reasons, forKey: .reasons)
         try c.encode(lastModified, forKey: .lastModified)
+        try c.encodeIfPresent(groupID, forKey: .groupID)
     }
 }

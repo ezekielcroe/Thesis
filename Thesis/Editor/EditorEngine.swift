@@ -61,6 +61,11 @@ struct Register: Equatable {
     var kind: UnitKind
 }
 
+enum ExportRequest: Equatable {
+    case document(ExportFormat)
+    case log(EvolutionLogFormat)
+}
+
 /// What the statistics sheet can be scoped to, captured when it opens.
 struct StatisticsContext {
     let text: String
@@ -105,8 +110,8 @@ final class EditorEngine: ObservableObject {
     @Published var panelRequest: PanelTab?
     /// Set by `:rename` with no name; the view shows the rename prompt.
     @Published var renameRequested = false
-    /// Set by `:export <format>`; the view shows the save panel.
-    @Published var exportRequest: ExportFormat?
+    /// Set by `:export <format>` or `:export log [format]`; the view shows the save panel.
+    @Published var exportRequest: ExportRequest?
     /// Set by `:preview`; the view toggles the formatted preview.
     @Published var previewRequested = false
 
@@ -121,6 +126,8 @@ final class EditorEngine: ObservableObject {
     private var helperInsertion: NSRange?     // space/line break added by a/o/O, removed if nothing is typed
     private var lengthAtInsertEntry = 0
     private var visualAnchor = 0
+    /// Set while Visual mode holds a mouse selection rather than whole units.
+    private var visualFreeRange: NSRange?
     private var visualKind: UnitKind = .sentence
     private var lastSearch = ""
     /// Set when searching from the statistics sheet: match "the" but not "there".
@@ -348,17 +355,21 @@ final class EditorEngine: ObservableObject {
         apply(op, to: unit.range, text: unit.text, kind: kind, insertedText: insertedText)
     }
 
+    /// - Parameter exact: delete precisely `range` (a mouse selection that doesn't sit on
+    ///   unit boundaries) instead of also tidying the spacing around a whole unit.
     private func apply(_ op: Operator, to range: NSRange, text unitText: String, kind: UnitKind,
-                       insertedText: String? = nil) {
+                       insertedText: String? = nil, exact: Bool = false) {
         switch op {
         case .delete:
             register = Register(text: unitText, kind: kind)
-            let removal = units.deletionRange(for: range, kind: kind)
+            document.recordCut(unitText)
+            let removal = exact ? range : units.deletionRange(for: range, kind: kind)
             replace(removal, with: "", cursorAfter: removal.location)
             lastRepeatable = .operate(.delete, kind, insertedText: nil)
 
         case .change:
             register = Register(text: unitText, kind: kind)
+            document.recordCut(unitText)
             if let replacement = insertedText {
                 replace(range, with: replacement, cursorAfter: range.location + replacement.utf16Length)
                 lastRepeatable = .operate(.change, kind, insertedText: replacement)
@@ -382,6 +393,7 @@ final class EditorEngine: ObservableObject {
     private func deleteToEndOfSentence(thenInsert: Bool) {
         guard let rest = units.restOfSentence(from: cursor) else { return }
         register = Register(text: substring(rest), kind: .clause)
+        document.recordCut(substring(rest))
         replace(rest, with: "", cursorAfter: rest.location)
         if thenInsert { enterInsert(at: rest.location) }
     }
@@ -498,6 +510,7 @@ final class EditorEngine: ObservableObject {
     // MARK: - Visual
 
     private func enterVisual() {
+        visualFreeRange = nil
         visualAnchor = cursor
         visualKind = .sentence
         mode = .visual
@@ -505,12 +518,64 @@ final class EditorEngine: ObservableObject {
     }
 
     private func exitVisual() {
+        visualFreeRange = nil
         mode = .normal
         buffer?.setHighlight(nil)
+        // Drop any mouse selection, leaving the cursor at its start.
+        if let selection = buffer?.cursorRange, selection.length > 0 { cursor = selection.location }
     }
 
-    /// Whole units of the most recent motion's kind, from the anchor to the cursor.
+    /// The user selected text with the mouse, shift-arrows or Select All outside Insert
+    /// mode. A selection enters Visual mode holding exactly that text; a plain click
+    /// (empty selection) while in Visual mode cancels it.
+    func userSelected(_ range: NSRange) {
+        guard mode == .normal || mode == .visual else { return }
+        if range.length > 0 {
+            pending = .none
+            visualFreeRange = range
+            visualAnchor = range.location
+            visualKind = .sentence
+            mode = .visual
+            updateVisualHighlight()
+        } else if mode == .visual {
+            exitVisual()
+        }
+    }
+
+    /// A motion key after a mouse selection: carry on from it, snapping to whole units.
+    private func adoptFreeSelection() {
+        guard let free = visualFreeRange else { return }
+        visualFreeRange = nil
+        visualAnchor = free.location
+        cursor = max(free.location, NSMaxRange(free) - 1)
+    }
+
+    /// How a mouse selection is treated when acted on: as paragraphs if it holds a whole
+    /// paragraph, as sentences if it holds a whole sentence, otherwise as words. `aligned`
+    /// says it starts and ends exactly on units of that kind, so deleting it can tidy the
+    /// spacing the way `ds` or `dw` would; anything else is deleted exactly as selected.
+    private func describeFreeSelection(_ range: NSRange) -> (kind: UnitKind, aligned: Bool) {
+        let u = units
+        let start = range.location, end = NSMaxRange(range)
+        func holdsWhole(_ kind: UnitKind) -> Bool {
+            u.units(kind).contains { $0.location >= start && $0.end <= end }
+        }
+        let kind: UnitKind = holdsWhole(.paragraph) ? .paragraph : (holdsWhole(.sentence) ? .sentence : .word)
+        let all = u.units(kind)
+        let aligned = all.contains { $0.location == start } && all.contains { $0.end == end }
+        return (kind, aligned)
+    }
+
+    private static let motionKeys: Set<Character> = ["h", "l", "H", "L", "j", "k", "w", "b", "J", "K", "G", "g", "[", "]", "n", "N"]
+
+    /// The mouse selection if there is one; otherwise whole units of the most recent
+    /// motion's kind, from the anchor to the cursor.
     private var visualRange: NSRange? {
+        if let free = visualFreeRange {
+            let length = text.utf16Length
+            let location = min(free.location, length)
+            return NSRange(location: location, length: min(free.length, length - location))
+        }
         let u = units
         let low = min(visualAnchor, cursor), high = max(visualAnchor, cursor)
         guard let first = u.unit(visualKind, at: low), let last = u.unit(visualKind, at: high) else { return nil }
@@ -537,13 +602,20 @@ final class EditorEngine: ObservableObject {
             let op: Operator? = (c == "x") ? .delete : Operator(rawValue: c)
             if let op = op {
                 guard let range = visualRange else { exitVisual(); return }
-                let kind = visualKind
+                var kind = visualKind
+                var exact = false
+                if visualFreeRange != nil {
+                    let description = describeFreeSelection(range)
+                    kind = description.kind
+                    exact = !description.aligned
+                }
                 let selected = substring(range)
                 exitVisual()
                 cursor = range.location
-                apply(op, to: range, text: selected, kind: kind)
+                apply(op, to: range, text: selected, kind: kind, exact: exact)
                 return
             }
+            if visualFreeRange != nil, Self.motionKeys.contains(c) { adoptFreeSelection() }
             _ = performMotion(c)
         default:
             break
@@ -590,10 +662,17 @@ final class EditorEngine: ObservableObject {
         case "preview", "p": previewRequested = true
         case "stats", "statistics": openStatistics()
         case "export":
-            if let format = argument.flatMap(ExportFormat.init(command:)) {
-                exportRequest = format
+            let words = (argument ?? "").split(separator: " ").map(String.init)
+            if words.first?.lowercased() == "log" {
+                if let format = EvolutionLogFormat(command: words.count > 1 ? words[1] : "") {
+                    exportRequest = .log(format)
+                } else {
+                    message = "Usage: :export log [md | pdf | docx]"
+                }
+            } else if let format = words.first.flatMap(ExportFormat.init(command:)) {
+                exportRequest = .document(format)
             } else {
-                message = "Usage: :export txt | md | pdf | archive"
+                message = "Usage: :export txt | md | pdf | docx | archive, or :export log [md | pdf | docx]"
             }
         default: message = "Unknown command :\(name)"
         }

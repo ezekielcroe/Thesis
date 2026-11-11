@@ -1,11 +1,3 @@
-//
-//  ProseDiff.swift
-//  Thesis
-//
-//  Created by Zhi Zheng Yeo on 2/11/26.
-//
-
-
 // ProseDiff.swift — Thesis
 // Works out what changed between two versions of a text, at the level writers think
 // in: sentences added, cut, reworded, rewritten or moved.
